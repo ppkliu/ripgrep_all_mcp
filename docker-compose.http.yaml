@@ -1,0 +1,39 @@
+# Streamable HTTP mode - for remote MCP clients
+services:
+  rga-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rga-mcp-http
+    restart: unless-stopped
+
+    environment:
+      - MCP_TRANSPORT=streamable-http
+      - MCP_PORT=3000
+      - UPLOAD_DIR=/data/uploads
+      - DOCUMENTS_DIR=/data/documents
+      - MAX_FILE_SIZE_MB=200
+      - MAX_OUTPUT_TOKENS=100000
+      - RGA_CACHE_DIR=/data/cache
+      - ENABLE_OCR=true
+      - LOG_LEVEL=info
+
+    volumes:
+      - ./documents:/data/documents:ro
+      - rga-uploads:/data/uploads
+      - rga-cache:/data/cache
+
+    ports:
+      - "30003:3000"
+
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+
+volumes:
+  rga-uploads:
+  rga-cache:

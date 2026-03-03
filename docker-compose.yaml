@@ -1,0 +1,42 @@
+services:
+  rga-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rga-mcp-server
+    restart: unless-stopped
+
+    environment:
+      - MCP_TRANSPORT=stdio
+      - UPLOAD_DIR=/data/uploads
+      - DOCUMENTS_DIR=/data/documents
+      - MAX_FILE_SIZE_MB=200
+      - MAX_OUTPUT_TOKENS=100000
+      - RGA_CACHE_DIR=/data/cache
+      - ENABLE_OCR=true
+      - LOG_LEVEL=info
+
+    volumes:
+      # 外掛資料夾：將本機文件夾掛載到容器的 /data/documents
+      # 修改此路徑為你要掃描的本機資料夾
+      - ./documents:/data/documents:ro
+      # 上傳檔案持久化
+      - rga-uploads:/data/uploads
+      # rga 快取
+      - rga-cache:/data/cache
+
+    # stdio 模式需要 stdin
+    stdin_open: true
+    tty: true
+
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+
+volumes:
+  rga-uploads:
+  rga-cache:
