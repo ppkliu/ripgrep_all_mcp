@@ -25,5 +25,8 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# Test output files
+testcase/agno/qa_results/*.md
+
 # Generated/empty directories
 .github/appmod/
