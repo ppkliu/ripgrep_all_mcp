@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.git
+.claude/
+docs/
+testcase/
+documents/
+*.md
+*.code-workspace
+examples.ts
+docker-compose*.yaml
