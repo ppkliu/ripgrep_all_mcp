@@ -8,3 +8,22 @@ dist/
 .vscode/
 .idea/
 coverage/
+
+# AI tool config
+.claude/
+
+# Sample documents
+documents/
+
+# Python virtual environment
+.venv/
+testcase/agno/.venv/
+
+# Python build artifacts
+*.egg-info/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Generated/empty directories
+.github/appmod/
