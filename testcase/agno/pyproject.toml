@@ -1,0 +1,17 @@
+[project]
+name = "rga-mcp-agno-tests"
+version = "1.0.0"
+description = "Agno agent integration tests for rga-mcp-server"
+requires-python = ">=3.11"
+dependencies = [
+    "agno",
+    "anthropic",
+    "litellm",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
