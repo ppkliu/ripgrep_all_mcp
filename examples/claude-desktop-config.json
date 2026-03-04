@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "rga": {
+      "type": "url",
+      "url": "http://localhost:30003/mcp"
+    }
+  }
+}
