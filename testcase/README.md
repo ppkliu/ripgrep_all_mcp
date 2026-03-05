@@ -245,12 +245,12 @@ SUMMARY
 
 ### 層級 3: Document QA Workflow (document_qa_workflow.py)
 
-**需要 Docker HTTP server + LiteLLM API**，自動化文件問答測試流程。
+**需要 Docker HTTP server + LLM API**，自動化文件問答測試流程。
 
 前置條件：
 - Docker HTTP server 已啟動
 - 已啟用 Agno 虛擬環境
-- 已設定 LiteLLM 相關環境變數
+- 已設定 LLM 環境變數 (`.env` 或 export)
 - documents/ 目錄中已放入測試文件
 
 ```bash
@@ -263,18 +263,22 @@ curl http://localhost:30003/health
 # 2. 啟用虛擬環境
 source testcase/agno/.venv/bin/activate
 
-# 3. 設定環境變數
-export LITELLM_MODEL="openai/your-model"       # LiteLLM 模型名稱
-export LITELLM_API_BASE="http://localhost:8000/v1"  # LiteLLM API 端點
-export LITELLM_API_KEY="sk-xxx"                 # LiteLLM API key
-export MCP_URL="http://localhost:30003/mcp"     # MCP HTTP URL
+# 3. 設定 .env (與 test_agno_rga.py 共用同一份)
+cd testcase/agno
+cp .env.example .env     # 編輯填入 LLM_API_BASE / LLM_API_KEY 等
 
-# 4. (選用) 進階設定
-export MAX_CONTEXT_TOKENS=32000                 # 最大上下文 token 數
-export DOCUMENTS_PATH="subfolder"               # 指定文件子路徑
+# 4. 執行
+python document_qa_workflow.py
+```
 
-# 5. 執行
-python testcase/agno/document_qa_workflow.py
+> **環境變數**: QA workflow 支援 `LLM_*` 和 `LITELLM_*` 兩組變數名稱（`LLM_*` 優先）。
+> 未設定 `LLM_MODEL` 時會自動從 API `/v1/models` 端點偵測可用模型。
+
+進階設定（`.env` 或 export）：
+```bash
+MCP_URL=http://localhost:30003/mcp      # MCP HTTP URL (預設)
+MAX_CONTEXT_TOKENS=32000                # 最大上下文 token 數
+DOCUMENTS_PATH=subfolder                # 指定文件子路徑
 ```
 
 執行流程（5 個階段）：
@@ -297,13 +301,13 @@ python testcase/agno/document_qa_workflow.py
 
 | 變數 | 用途 | 預設值 |
 |------|------|--------|
-| `LLM_API_BASE` | OpenAI-compatible API 端點 (test_agno_rga.py) | (無) |
+| `LLM_API_BASE` | OpenAI-compatible API 端點 | (無) |
 | `LLM_API_KEY` | OpenAI-compatible API key | `no-key` |
-| `LLM_MODEL` | LLM 模型名稱 (litellm 格式) | 依 provider 自動選擇 |
+| `LLM_MODEL` | LLM 模型名稱 (litellm 格式)，未設定時自動偵測 | 依 provider 自動選擇 |
 | `ANTHROPIC_API_KEY` | Anthropic API key | (無) |
-| `LITELLM_MODEL` | QA workflow 使用的模型 | `openai/your-model-name` |
-| `LITELLM_API_BASE` | LiteLLM API 端點 | `http://localhost:8000/v1` |
-| `LITELLM_API_KEY` | LiteLLM API key | `sk-placeholder` |
+| `LITELLM_MODEL` | `LLM_MODEL` 的別名 (向下相容) | (無) |
+| `LITELLM_API_BASE` | `LLM_API_BASE` 的別名 (向下相容) | (無) |
+| `LITELLM_API_KEY` | `LLM_API_KEY` 的別名 (向下相容) | (無) |
 | `MCP_URL` | MCP HTTP server URL | `http://localhost:30003/mcp` |
 | `MAX_CONTEXT_TOKENS` | QA workflow 最大上下文 token 數 | `32000` |
 | `DOCUMENTS_PATH` | 文件子路徑 (相對於 /data/documents) | (空, 即根目錄) |
@@ -316,7 +320,7 @@ python testcase/agno/document_qa_workflow.py
 | MCP 整合測試 | `mcp-server.test.ts` | 是 | 否 |
 | Agno 連線測試 | `test_agno_rga.py --connection-only` | 否 | 否 |
 | Agno 完整測試 | `test_agno_rga.py` | 是 | 是 (Anthropic 或 OpenAI-compatible) |
-| QA Workflow | `document_qa_workflow.py` | 是 (Docker) | 是 (LiteLLM) |
+| QA Workflow | `document_qa_workflow.py` | 是 (Docker) | 是 (OpenAI-compatible 或 Anthropic) |
 
 ## 輸出檔案 (已加入 .gitignore)
 
