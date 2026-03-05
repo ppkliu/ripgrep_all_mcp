@@ -31,13 +31,42 @@ testcase/
 ### Agno 測試 (Python)
 
 - Python >= 3.11
-- 安裝依賴:
-  ```bash
-  cd testcase/agno
-  uv venv && uv pip install -e ".[dev]"
-  # 或
-  pip install -r requirements.txt
-  ```
+- [uv](https://docs.astral.sh/uv/) (建議) 或 pip
+
+#### 使用 uv 建立虛擬環境 (建議)
+
+```bash
+# 進入 agno 測試目錄
+cd testcase/agno
+
+# 建立虛擬環境 (會在 testcase/agno/.venv/ 下建立)
+uv venv
+
+# 啟用虛擬環境
+source .venv/bin/activate      # Linux / macOS
+# .venv\Scripts\activate       # Windows
+
+# 安裝依賴 (含 dev 套件: pytest, pytest-asyncio)
+uv pip install -e ".[dev]"
+
+# 驗證安裝
+python -c "import agno; import anthropic; import litellm; print('OK')"
+```
+
+#### 使用 pip (替代方案)
+
+```bash
+cd testcase/agno
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+安裝完成後回到 repo 根目錄執行測試：
+
+```bash
+cd ../..   # 回到 ripgrep_all_mcp/
+```
 
 ## 執行測試
 
@@ -71,34 +100,140 @@ NODE_OPTIONS='--experimental-vm-modules' npx jest --config jest.config.js testca
 ./testcase/run-all-tests.sh --agno       # 只跑 Agno 連線測試
 ```
 
-### Agno 測試
+---
+
+## Agno Agent 測試詳細說明
+
+Agno 測試分為三個層級，由淺到深：
+
+### 層級 1: MCP 連線測試 (test_agno_rga.py --connection-only)
+
+**不需要 API key**，僅測試 MCP server 是否正常啟動、工具是否正確註冊。
+
+前置條件：
+- 已編譯 TypeScript：`npm run build`
+- 已啟用 Agno 虛擬環境
 
 ```bash
-# 連線測試 (不需要 API key)
-python testcase/agno/test_agno_rga.py --connection-only
+# 啟用虛擬環境 (如果尚未啟用)
+source testcase/agno/.venv/bin/activate
 
-# 完整測試 (需要 ANTHROPIC_API_KEY)
-export ANTHROPIC_API_KEY="your-api-key"
+# 執行連線測試
+python testcase/agno/test_agno_rga.py --connection-only
+```
+
+測試內容：
+- 透過 stdio 啟動 MCP server (node dist/index.js)
+- 驗證 MCP 連線成功
+- 檢查 4 個工具是否已註冊：`rga_upload_file`, `rga_extract_text`, `rga_search_content`, `rga_list_supported_formats`
+
+預期輸出：
+```
+============================================================
+TEST 1: MCP Connection & Tool Discovery
+============================================================
+[PASS] MCP server connected successfully
+[INFO] Discovered 5 tools: [...]
+  [PASS] rga_upload_file
+  [PASS] rga_extract_text
+  [PASS] rga_search_content
+  [PASS] rga_list_supported_formats
+```
+
+### 層級 2: 完整工具測試 (test_agno_rga.py)
+
+**需要 ANTHROPIC_API_KEY**，測試所有 MCP 工具的實際調用，以及 Agno Agent 的 LLM 整合。
+
+前置條件：
+- 已編譯 TypeScript：`npm run build`
+- 已啟用 Agno 虛擬環境
+- 已設定 ANTHROPIC_API_KEY
+
+```bash
+# 啟用虛擬環境
+source testcase/agno/.venv/bin/activate
+
+# 設定 API key
+export ANTHROPIC_API_KEY="sk-ant-xxx"
+
+# 執行完整測試
 python testcase/agno/test_agno_rga.py
 ```
 
-### Document QA Workflow
+測試內容（3 個階段）：
+
+| 階段 | 測試名稱 | 需要 API key | 說明 |
+|------|---------|-------------|------|
+| Test 1 | MCP Connection | 否 | 連線與工具發現 |
+| Test 2 | Direct Tool Calls | 否 | 直接呼叫每個工具 (list_formats, upload, extract, search) |
+| Test 3 | Agno Agent Integration | 是 | LLM Agent 透過自然語言驅動工具呼叫 |
+
+Test 2 會自動建立臨時測試文件 (sample.txt, notes.md, config.json)，測試完畢後自動清理。
+
+Test 3 會讓 Agent 執行三個任務：
+1. 列出支援的文件格式
+2. 在文件中搜尋 "bug"
+3. 提取 sample.txt 的內容並摘要
+
+預期輸出：
+```
+============================================================
+SUMMARY
+============================================================
+  [PASS] MCP Connection
+  [PASS] Direct Tool Calls
+  [PASS] Agno Agent
+```
+
+### 層級 3: Document QA Workflow (document_qa_workflow.py)
+
+**需要 Docker HTTP server + LiteLLM API**，自動化文件問答測試流程。
+
+前置條件：
+- Docker HTTP server 已啟動
+- 已啟用 Agno 虛擬環境
+- 已設定 LiteLLM 相關環境變數
+- documents/ 目錄中已放入測試文件
 
 ```bash
 # 1. 啟動 MCP HTTP server
 docker compose -f docker-compose.http.yaml up -d
 
-# 2. 設定環境變數
-export LITELLM_MODEL="openai/your-model"
-export LITELLM_API_BASE="http://localhost:8000/v1"
-export LITELLM_API_KEY="sk-xxx"
-export MCP_URL="http://localhost:30003/mcp"
+# 驗證 server 啟動
+curl http://localhost:30003/health
 
-# 3. 執行
+# 2. 啟用虛擬環境
+source testcase/agno/.venv/bin/activate
+
+# 3. 設定環境變數
+export LITELLM_MODEL="openai/your-model"       # LiteLLM 模型名稱
+export LITELLM_API_BASE="http://localhost:8000/v1"  # LiteLLM API 端點
+export LITELLM_API_KEY="sk-xxx"                 # LiteLLM API key
+export MCP_URL="http://localhost:30003/mcp"     # MCP HTTP URL
+
+# 4. (選用) 進階設定
+export MAX_CONTEXT_TOKENS=32000                 # 最大上下文 token 數
+export DOCUMENTS_PATH="subfolder"               # 指定文件子路徑
+
+# 5. 執行
 python testcase/agno/document_qa_workflow.py
 ```
 
-結果會自動輸出到 `testcase/agno/qa_results/qa_YYYYMMDD_HHMMSS.md`。
+執行流程（5 個階段）：
+
+| 階段 | 說明 |
+|------|------|
+| Phase 1 | 透過 MCP `rga_list_documents` 列出所有文件 |
+| Phase 2 | 對每個文件提取文字、用 LLM 生成 5-10 個問題、建立摘要 |
+| Phase 3 | 產生文件摘要 Markdown 表格 |
+| Phase 4 | Agno Agent 逐一回答問題，分別測試「有摘要」和「無摘要」兩種情境 |
+| Phase 5 | 輸出帶時間戳的 QA 結果 Markdown |
+
+結果會自動輸出到 `testcase/agno/qa_results/qa_YYYYMMDD_HHMMSS.md`，包含：
+- 文件摘要表格
+- 每題的回答、tool calling 記錄、回應時間
+- Tool calling 分析統計
+- Summary Context 對照比較
 
 ## 環境變數
 
