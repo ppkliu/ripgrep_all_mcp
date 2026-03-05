@@ -187,7 +187,7 @@ python testcase/agno/test_agno_rga.py
 ```bash
 LLM_API_BASE=http://localhost:1234/v1
 LLM_API_KEY=lm-studio
-LLM_MODEL=openai/your-local-model
+# LLM_MODEL 選填，未設定時自動從 API /v1/models 偵測
 ```
 
 或直接 export：
@@ -215,8 +215,8 @@ python testcase/agno/test_agno_rga.py
 
 - OpenAI-compatible: `openai/<model-name>` (例如 `openai/llama3.1`)
 - Anthropic: 直接使用模型 ID (例如 `claude-sonnet-4-5`)
-
-可透過 `LLM_MODEL` 環境變數覆蓋預設值。
+- **未設定時**: 自動查詢 `{LLM_API_BASE}/models` 端點偵測可用模型
+- 若指定模型名稱不含 `/`，會自動補上 `openai/` 前綴
 
 #### 測試內容（3 個階段）
 
