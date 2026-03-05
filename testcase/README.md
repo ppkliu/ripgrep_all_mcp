@@ -13,6 +13,7 @@ testcase/
 ├── mcp-server.test.ts       # 整合測試: 啟動 MCP server，透過 MCP SDK Client 測試
 ├── run-all-tests.sh         # 全測試執行腳本
 └── agno/
+    ├── .env.example          # 環境變數範例 (複製為 .env 使用)
     ├── pyproject.toml        # Python 專案設定
     ├── requirements.txt      # Python 依賴清單
     ├── test_agno_rga.py      # Agno Agent 整合測試 (stdio 模式)
@@ -142,27 +143,84 @@ TEST 1: MCP Connection & Tool Discovery
 
 ### 層級 2: 完整工具測試 (test_agno_rga.py)
 
-**需要 ANTHROPIC_API_KEY**，測試所有 MCP 工具的實際調用，以及 Agno Agent 的 LLM 整合。
+**需要 LLM API**（Anthropic 或 OpenAI-compatible local LLM），測試所有 MCP 工具的實際調用，以及 Agno Agent 的 LLM 整合。
 
 前置條件：
 - 已編譯 TypeScript：`npm run build`
 - 已啟用 Agno 虛擬環境
-- 已設定 ANTHROPIC_API_KEY
+- 已設定 LLM API（二擇一，見下方）
+
+#### 使用 .env 檔案設定 (建議)
+
+測試腳本會自動載入 `testcase/agno/.env`，不需要手動 export 環境變數：
 
 ```bash
-# 啟用虛擬環境
-source testcase/agno/.venv/bin/activate
+# 複製範例檔並編輯
+cd testcase/agno
+cp .env.example .env
+# 編輯 .env 填入實際值
 
-# 設定 API key
+# 執行測試
+source .venv/bin/activate
+python test_agno_rga.py
+```
+
+#### 方式 A: 使用 Anthropic API
+
+`.env` 設定：
+```bash
+ANTHROPIC_API_KEY=sk-ant-xxx
+# LLM_MODEL=claude-sonnet-4-5    # 選填，預設 claude-sonnet-4-5
+```
+
+或直接 export：
+```bash
 export ANTHROPIC_API_KEY="sk-ant-xxx"
-
-# 執行完整測試
 python testcase/agno/test_agno_rga.py
 ```
 
-測試內容（3 個階段）：
+#### 方式 B: 使用 OpenAI-compatible Local LLM
 
-| 階段 | 測試名稱 | 需要 API key | 說明 |
+適用於 LM Studio、Ollama、vLLM、LocalAI 等提供 OpenAI-compatible API 的本地模型。
+
+`.env` 設定：
+```bash
+LLM_API_BASE=http://localhost:1234/v1
+LLM_API_KEY=lm-studio
+LLM_MODEL=openai/your-local-model
+```
+
+或直接 export：
+```bash
+export LLM_API_BASE="http://localhost:1234/v1"
+export LLM_API_KEY="lm-studio"
+export LLM_MODEL="openai/your-local-model"
+python testcase/agno/test_agno_rga.py
+```
+
+常見 Local LLM 設定範例：
+
+| LLM 服務 | LLM_API_BASE | LLM_MODEL | 備註 |
+|----------|-------------|-----------|------|
+| LM Studio | `http://localhost:1234/v1` | `openai/lmstudio-model` | 啟動後自動提供 API |
+| Ollama | `http://localhost:11434/v1` | `openai/llama3.1` | 需先 `ollama serve` |
+| vLLM | `http://localhost:8000/v1` | `openai/Qwen2.5-72B` | 依啟動參數而定 |
+| LocalAI | `http://localhost:8080/v1` | `openai/gpt-4` | 依載入模型而定 |
+
+> **LLM 優先順序**: 若同時設定 `LLM_API_BASE` 和 `ANTHROPIC_API_KEY`，會優先使用 OpenAI-compatible API。
+
+#### LLM_MODEL 格式說明
+
+模型名稱使用 [LiteLLM](https://docs.litellm.ai/docs/providers) 格式：
+
+- OpenAI-compatible: `openai/<model-name>` (例如 `openai/llama3.1`)
+- Anthropic: 直接使用模型 ID (例如 `claude-sonnet-4-5`)
+
+可透過 `LLM_MODEL` 環境變數覆蓋預設值。
+
+#### 測試內容（3 個階段）
+
+| 階段 | 測試名稱 | 需要 LLM API | 說明 |
 |------|---------|-------------|------|
 | Test 1 | MCP Connection | 否 | 連線與工具發現 |
 | Test 2 | Direct Tool Calls | 否 | 直接呼叫每個工具 (list_formats, upload, extract, search) |
@@ -239,7 +297,10 @@ python testcase/agno/document_qa_workflow.py
 
 | 變數 | 用途 | 預設值 |
 |------|------|--------|
-| `ANTHROPIC_API_KEY` | Agno Agent 測試用 API key | (無) |
+| `LLM_API_BASE` | OpenAI-compatible API 端點 (test_agno_rga.py) | (無) |
+| `LLM_API_KEY` | OpenAI-compatible API key | `no-key` |
+| `LLM_MODEL` | LLM 模型名稱 (litellm 格式) | 依 provider 自動選擇 |
+| `ANTHROPIC_API_KEY` | Anthropic API key | (無) |
 | `LITELLM_MODEL` | QA workflow 使用的模型 | `openai/your-model-name` |
 | `LITELLM_API_BASE` | LiteLLM API 端點 | `http://localhost:8000/v1` |
 | `LITELLM_API_KEY` | LiteLLM API key | `sk-placeholder` |
@@ -254,7 +315,7 @@ python testcase/agno/document_qa_workflow.py
 | 單元測試 | `*.test.ts` (除 mcp-server) | 部分 | 否 |
 | MCP 整合測試 | `mcp-server.test.ts` | 是 | 否 |
 | Agno 連線測試 | `test_agno_rga.py --connection-only` | 否 | 否 |
-| Agno 完整測試 | `test_agno_rga.py` | 是 | 是 (Anthropic) |
+| Agno 完整測試 | `test_agno_rga.py` | 是 | 是 (Anthropic 或 OpenAI-compatible) |
 | QA Workflow | `document_qa_workflow.py` | 是 (Docker) | 是 (LiteLLM) |
 
 ## 輸出檔案 (已加入 .gitignore)

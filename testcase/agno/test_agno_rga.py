@@ -3,19 +3,24 @@ Agno + rga-mcp-server 整合測試
 
 使用方式:
     # 1. 安裝依賴
-    pip install agno anthropic
+    cd testcase/agno && uv venv && source .venv/bin/activate
+    uv pip install -e ".[dev]"
 
     # 2. 確保 MCP server 已建構
     cd /path/to/ripgrep_all_mcp
     npm run build
 
-    # 3. 設定環境變數
+    # 3a. 使用 Anthropic API
     export ANTHROPIC_API_KEY="your-api-key"
-
-    # 4. 執行測試
     python testcase/agno/test_agno_rga.py
 
-    # 或執行不需要 API key 的連線測試
+    # 3b. 使用 OpenAI-compatible local LLM (LM Studio, Ollama, vLLM 等)
+    export LLM_API_BASE="http://localhost:1234/v1"
+    export LLM_API_KEY="lm-studio"               # 或任意值
+    export LLM_MODEL="openai/your-local-model"    # litellm 格式: openai/<model-name>
+    python testcase/agno/test_agno_rga.py
+
+    # 連線測試 (不需要 API key)
     python testcase/agno/test_agno_rga.py --connection-only
 """
 
@@ -30,6 +35,27 @@ from pathlib import Path
 # ============================================================
 # 設定
 # ============================================================
+
+# 載入 .env 檔案 (testcase/agno/.env)
+def _load_dotenv():
+    """從 testcase/agno/.env 載入環境變數，不覆蓋已存在的值。"""
+    env_file = Path(__file__).resolve().parent / ".env"
+    if not env_file.exists():
+        return
+    print(f"[config] Loading .env from {env_file}")
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key not in os.environ:
+            os.environ[key] = value
+
+_load_dotenv()
 
 # MCP server 路徑
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -230,25 +256,65 @@ async def test_direct_tool_calls():
 
 
 # ============================================================
+# LLM Model 設定
+# ============================================================
+
+def _resolve_model():
+    """
+    依據環境變數決定使用的 LLM model。
+
+    優先順序:
+      1. LLM_API_BASE 設定 → OpenAI-compatible (透過 LiteLLM)
+      2. ANTHROPIC_API_KEY 設定 → Anthropic Claude
+      3. 都沒設定 → 回傳 None (跳過 Agent 測試)
+
+    環境變數:
+      LLM_API_BASE  — OpenAI-compatible API 端點 (e.g. http://localhost:1234/v1)
+      LLM_API_KEY   — API key (預設 "no-key")
+      LLM_MODEL     — 模型名稱 (預設 "openai/local-model")，需使用 litellm 格式
+      ANTHROPIC_API_KEY — Anthropic API key
+    """
+    llm_api_base = os.getenv("LLM_API_BASE")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+
+    if llm_api_base:
+        from agno.models.litellm import LiteLLM
+        model_id = os.getenv("LLM_MODEL", "openai/local-model")
+        api_key = os.getenv("LLM_API_KEY", "no-key")
+        print(f"[config] LLM: LiteLLM (OpenAI-compatible)")
+        print(f"[config]   model:    {model_id}")
+        print(f"[config]   api_base: {llm_api_base}")
+        return LiteLLM(id=model_id, api_base=llm_api_base, api_key=api_key)
+
+    if anthropic_key:
+        from agno.models.anthropic import Claude
+        model_id = os.getenv("LLM_MODEL", "claude-sonnet-4-5")
+        print(f"[config] LLM: Anthropic Claude")
+        print(f"[config]   model: {model_id}")
+        return Claude(id=model_id)
+
+    return None
+
+
+# ============================================================
 # 測試 3: Agno Agent 整合測試 (需要 API key)
 # ============================================================
 
 async def test_agno_agent():
     """
     完整的 Agno Agent 整合測試
-    需要 ANTHROPIC_API_KEY 環境變數
+    需要 LLM_API_BASE (OpenAI-compatible) 或 ANTHROPIC_API_KEY
     """
     from agno.agent import Agent
-    from agno.models.anthropic import Claude
     from agno.tools.mcp import MCPTools
 
     print("\n" + "=" * 60)
-    print("TEST 3: Agno Agent Integration (requires API key)")
+    print("TEST 3: Agno Agent Integration (requires LLM API)")
     print("=" * 60)
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("[SKIP] ANTHROPIC_API_KEY not set. Set it to run this test.")
+    model = _resolve_model()
+    if model is None:
+        print("[SKIP] No LLM configured. Set LLM_API_BASE or ANTHROPIC_API_KEY.")
         return True
 
     server_cmd = f"node {SERVER_JS}"
@@ -267,7 +333,7 @@ async def test_agno_agent():
 
         agent = Agent(
             name="RGA Test Agent",
-            model=Claude(id="claude-sonnet-4-5"),
+            model=model,
             tools=[mcp_tools],
             instructions=[
                 "You have access to rga MCP tools for document search.",
