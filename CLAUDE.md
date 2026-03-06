@@ -20,8 +20,8 @@ NODE_OPTIONS='--experimental-vm-modules' npx jest --config jest.config.js testca
 Docker:
 ```bash
 npm run docker:build                                    # docker compose build
-npm run docker:up                                       # docker compose up -d (stdio mode)
-docker compose -f docker-compose.http.yaml up -d        # HTTP mode (port 30003)
+npm run docker:up                                       # docker compose up -d (HTTP mode, default)
+docker compose -f docker-compose.stdio.yaml up -d       # stdio mode
 curl http://localhost:30003/health                      # verify HTTP mode
 ```
 
@@ -75,8 +75,8 @@ ESM quirk: jest config must be `.js` (not `.ts`) since ts-node is not installed.
 ## Docker
 
 Two compose files:
-- `docker-compose.yaml` — stdio mode (`stdin_open: true`, `tty: true`)
-- `docker-compose.http.yaml` — HTTP mode, port mapping `30003:3000`, `MCP_TRANSPORT=streamable-http`
+- `docker-compose.yaml` — HTTP mode (default), port mapping `30003:3000`, `MCP_TRANSPORT=streamable-http`
+- `docker-compose.stdio.yaml` — stdio mode (`stdin_open: true`, `tty: true`)
 
 The Dockerfile is a multi-stage build (node:22-bookworm-slim) that installs all rga adapter dependencies: poppler-utils, pandoc, ffmpeg, tesseract-ocr (eng/chi-tra/chi-sim), and rga v1.0.0-alpha.5. Mount documents at `/data/documents:ro`.
 

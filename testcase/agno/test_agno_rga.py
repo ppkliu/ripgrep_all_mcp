@@ -9,7 +9,7 @@ Agno + rga-mcp-server 整合測試
     uv pip install -e ".[dev]"
 
     # 2. 啟動 Docker MCP HTTP server
-    docker compose -f docker-compose.http.yaml up -d
+    docker compose up -d
 
     # 3. 設定 .env (複製範例檔並編輯)
     cp .env.example .env

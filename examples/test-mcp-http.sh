@@ -2,7 +2,7 @@
 # test-mcp-http.sh - MCP HTTP API quick test
 #
 # Prerequisites:
-#   docker compose -f docker-compose.http.yaml up -d
+#   docker compose up -d
 #
 # Usage:
 #   ./examples/test-mcp-http.sh

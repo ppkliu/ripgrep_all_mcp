@@ -21,7 +21,7 @@ CLI 參數可覆蓋 .env 設定:
 
 使用方式:
     # 1. 啟動 MCP Docker HTTP server
-    docker compose -f docker-compose.http.yaml up -d
+    docker compose up -d
 
     # 2. 安裝依賴 + 設定 .env
     cd testcase/agno
