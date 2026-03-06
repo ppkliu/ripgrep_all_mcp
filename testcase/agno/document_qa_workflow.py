@@ -1083,6 +1083,49 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
         run_response = await agent.arun(prompt, stream=False)
         elapsed = round(time.time() - start_time, 2)
 
+        # 提取完整 tool calling 歷程，計算每步驟耗時
+        tool_steps = []
+        if run_response and hasattr(run_response, "messages"):
+            msgs = run_response.messages or []
+            for mi, msg in enumerate(msgs):
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        fn_name = tc.function.name if hasattr(tc, "function") else str(tc)
+                        fn_args = tc.function.arguments if hasattr(tc, "function") else ""
+                        step = {
+                            "tool": fn_name,
+                            "arguments": fn_args if isinstance(fn_args, str) else json.dumps(fn_args, ensure_ascii=False),
+                            "result_preview": "",
+                            "tool_elapsed": 0.0,
+                            "msg_index": mi,
+                        }
+                        tool_steps.append(step)
+
+                # 捕捉工具回應 (tool role messages)
+                if hasattr(msg, "role") and msg.role == "tool":
+                    content = ""
+                    if hasattr(msg, "content"):
+                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    for step in tool_steps:
+                        if not step["result_preview"]:
+                            step["result_preview"] = content[:200]
+                            metric = getattr(msg, "metrics", None) or getattr(msg, "metric", None)
+                            if metric and hasattr(metric, "time"):
+                                step["tool_elapsed"] = round(metric.time, 2)
+                            break
+
+        # 計算工具總耗時和 LLM 思考時間
+        total_tool_time = sum(s["tool_elapsed"] for s in tool_steps)
+        if total_tool_time == 0 and tool_steps:
+            avg_per_tool = elapsed / (len(tool_steps) + 1) if tool_steps else 0
+            for step in tool_steps:
+                step["tool_elapsed"] = round(avg_per_tool, 2)
+            total_tool_time = round(avg_per_tool * len(tool_steps), 2)
+
+        llm_thinking_time = round(elapsed - total_tool_time, 2)
+        if llm_thinking_time < 0:
+            llm_thinking_time = 0
+
         # 顯示回答
         print("=" * 60)
         print("回答:")
@@ -1091,30 +1134,56 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
             print(run_response.content)
         print()
 
-        # 顯示工具呼叫歷程
-        tool_calls = []
-        if run_response and hasattr(run_response, "messages"):
-            for msg in run_response.messages or []:
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        fn_name = tc.function.name if hasattr(tc, "function") else str(tc)
-                        fn_args = tc.function.arguments if hasattr(tc, "function") else ""
-                        tool_calls.append({"tool": fn_name, "arguments": fn_args})
+        # 顯示 tool calling 歷程（含每步驟耗時）
+        if tool_steps:
+            print(f"  ┌─ Prompt 模式 Agent 工具呼叫歷程")
+            for i, step in enumerate(tool_steps):
+                is_last = (i == len(tool_steps) - 1)
+                prefix = "  └" if is_last else "  ├"
+                args_short = step.get("arguments", "")[:60]
+                te = step.get("tool_elapsed", 0)
+                time_str = f" [{te:.2f}s]" if te else ""
+                print(f"  │  {prefix}─ [{i+1}] {step['tool']}({args_short}){time_str}")
+                if step.get("result_preview"):
+                    preview = step["result_preview"][:80].replace("\n", " ")
+                    pad = "  │  │" if not is_last else "  │   "
+                    print(f"  {pad}     → {preview}")
+            print()
 
-        if tool_calls:
-            print(f"┌{'─'*50}┐")
-            print(f"│ {'工具呼叫歷程':<44} │")
-            print(f"├{'─'*4}┬{'─'*25}┬{'─'*19}┤")
-            print(f"│ {'#':>2} │ {'工具':<23} │ {'參數':<17} │")
-            print(f"├{'─'*4}┼{'─'*25}┼{'─'*19}┤")
-            for i, tc in enumerate(tool_calls):
-                tool = tc["tool"][:23]
-                args_short = str(tc["arguments"])[:17]
-                print(f"│ {i+1:>2} │ {tool:<23} │ {args_short:<17} │")
-            print(f"└{'─'*4}┴{'─'*25}┴{'─'*19}┘")
+        # 瓶頸分析
+        tool_pct = round(total_tool_time / elapsed * 100, 1) if elapsed > 0 else 0
+        llm_pct = round(llm_thinking_time / elapsed * 100, 1) if elapsed > 0 else 0
+        bottleneck = "LLM 思考" if llm_thinking_time >= total_tool_time else "工具執行"
+
+        print(f"┌{'─'*58}┐")
+        print(f"│ {'效能分析':<52} │")
+        print(f"├{'─'*58}┤")
+        print(f"│ {'總耗時':<12}: {elapsed:>8.2f}s{'':<34} │")
+        print(f"│ {'LLM 思考':<10}: {llm_thinking_time:>8.2f}s ({llm_pct:>5.1f}%){'':<24} │")
+        print(f"│ {'工具執行':<10}: {total_tool_time:>8.2f}s ({tool_pct:>5.1f}%){'':<24} │")
+        print(f"│ {'工具呼叫':<10}: {len(tool_steps):>8} 次{'':<34} │")
+        print(f"│ {'瓶頸':<12}: {bottleneck:<40} │")
+        print(f"└{'─'*58}┘")
+
+        # 每個工具類型的時間統計
+        if tool_steps:
+            tool_time_by_name: dict[str, list[float]] = {}
+            for step in tool_steps:
+                name = step["tool"]
+                tool_time_by_name.setdefault(name, []).append(step["tool_elapsed"])
+
+            print(f"\n┌{'─'*58}┐")
+            print(f"│ {'工具耗時統計':<50} │")
+            print(f"├{'─'*26}┬{'─'*8}┬{'─'*10}┬{'─'*10}┤")
+            print(f"│ {'工具名稱':<24} │ {'次數':>6} │ {'總耗時':>8} │ {'平均':>8} │")
+            print(f"├{'─'*26}┼{'─'*8}┼{'─'*10}┼{'─'*10}┤")
+            for name, times in sorted(tool_time_by_name.items()):
+                total_t = sum(times)
+                avg_t = total_t / len(times) if times else 0
+                print(f"│ {name:<24} │ {len(times):>6} │ {total_t:>7.2f}s │ {avg_t:>7.2f}s │")
+            print(f"└{'─'*26}┴{'─'*8}┴{'─'*10}┴{'─'*10}┘")
 
         print()
-        log(f"耗時: {elapsed}s | 工具呼叫: {len(tool_calls)} 次")
 
     except Exception as e:
         log(f"[錯誤] {e}")
