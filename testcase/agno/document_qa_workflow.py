@@ -1073,8 +1073,16 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
         markdown=True,
     )
 
+    model_id, api_base, _ = agent_config
+    print(f"┌{'─'*58}┐")
+    print(f"│ {'Prompt 模式':<52} │")
+    print(f"├{'─'*58}┤")
+    print(f"│ {'LLM 模型':<10}: {model_id:<42} │")
+    print(f"│ {'API Base':<10}: {(api_base or 'Anthropic'):<42} │")
+    print(f"│ {'MCP URL':<10}: {MCP_URL:<42} │")
+    print(f"└{'─'*58}┘")
+    print()
     log(f"提問: {prompt}")
-    log(f"Agent LLM: {agent_config[0]}")
     print()
 
     start_time = time.time()
