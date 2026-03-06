@@ -87,6 +87,10 @@ def _parse_args() -> argparse.Namespace:
   # 直接提問模式 (跳過自動測試流程)
   python document_qa_workflow.py --prompt "這份文件的主題是什麼？"
   python document_qa_workflow.py --prompt "找出關於 MCP 的說明" --use-model 2
+
+  # PDF 載入策略: pages=只載入相關頁面(快), full=找到關鍵字後載入整份PDF(完整)
+  python document_qa_workflow.py --prompt "分析整份報告" --pdf-strategy full
+  python document_qa_workflow.py --prompt "找出第3章重點" --pdf-strategy pages
 """,
     )
     # 模式選擇
@@ -104,6 +108,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--mcp-url", help="MCP HTTP URL (覆蓋 MCP_URL)")
     p.add_argument("--max-tokens", type=int, help="最大 context token 數 (覆蓋 MAX_CONTEXT_TOKENS)")
     p.add_argument("--doc-path", help="文件子路徑 (覆蓋 DOCUMENTS_PATH)")
+    p.add_argument("--pdf-strategy", choices=["pages", "full"], default="pages",
+                   help="PDF 載入策略: pages=只載入相關頁面 (快), full=找到關鍵字後載入整份 PDF (完整) (預設: pages)")
     return p.parse_args()
 
 
@@ -1069,7 +1075,7 @@ def _extract_file_paths(prompt: str) -> list[str]:
 PRE_EXTRACT_MAX_TOKENS = 100_000  # 小於 100K tokens 的文件預先載入
 
 
-async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
+async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple, pdf_strategy: str = "pages"):
     """直接提問模式: 用 Agent 搜尋文件並回答問題。"""
     from agno.agent import Agent
 
@@ -1150,16 +1156,29 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
             instructions.append(text)
             instructions.append(f"--- 文件結束: {fp} ---\n")
     else:
-        instructions.extend([
-            "",
-            "效能提示 (兩階段加速策略):",
-            "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
-            "- 大型 PDF (>30頁): 先用 rga_search_content 搜尋關鍵字找到相關頁碼，",
-            "  再用 rga_extract_text 的 page_start/page_end 參數只提取相關頁面 (速度快 5-10x)",
-            "- 小型文件 (<30頁): 直接用 rga_extract_text 提取全文",
-            "- 優先用 rga_search_content 精準搜尋，而非提取整個大文件",
-            "- 避免重複呼叫相同工具和相同參數",
-        ])
+        if pdf_strategy == "full":
+            instructions.extend([
+                "",
+                "效能提示 (整份載入策略):",
+                "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
+                "- PDF 文件: 先用 rga_search_content 搜尋關鍵字確認文件相關性，",
+                "  確認相關後用 rga_extract_text 載入整份 PDF 完整內容",
+                "- 小型文件: 直接用 rga_extract_text 提取全文",
+                "- 避免重複呼叫相同工具和相同參數",
+            ])
+        else:
+            instructions.extend([
+                "",
+                "效能提示 (頁面範圍加速策略):",
+                "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
+                "- 大型 PDF (>30頁): 先用 rga_search_content 搜尋關鍵字找到相關頁碼，",
+                "  再用 rga_extract_text 的 page_start/page_end 參數只提取相關頁面 (速度快 5-10x)",
+                "- 小型文件 (<30頁): 直接用 rga_extract_text 提取全文",
+                "- 優先用 rga_search_content 精準搜尋，而非提取整個大文件",
+                "- 避免重複呼叫相同工具和相同參數",
+            ])
+
+    log(f"PDF 策略: {'整份載入' if pdf_strategy == 'full' else '頁面範圍'}")
 
     agent = Agent(
         name="Document QA Agent",
@@ -1356,7 +1375,7 @@ async def main():
 
         # --prompt 模式: 直接提問
         if args.prompt:
-            await _run_prompt_mode(mcp_tools, args.prompt, agent_config)
+            await _run_prompt_mode(mcp_tools, args.prompt, agent_config, args.pdf_strategy)
             return
 
         # === 完整自動化測試流程 ===
