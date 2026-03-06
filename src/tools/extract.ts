@@ -32,10 +32,12 @@ export async function extractText(
   fileId: string,
   maxTokens: number,
   enableOcr: boolean,
-  responseFormat: string
+  responseFormat: string,
+  pageStart?: number,
+  pageEnd?: number
 ) {
   // 快取檢查
-  const cacheKey = `${fileId}:${maxTokens}:${enableOcr}:${responseFormat}`;
+  const cacheKey = `${fileId}:${maxTokens}:${enableOcr}:${responseFormat}:${pageStart}:${pageEnd}`;
   const cached = extractCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < EXTRACT_CACHE_TTL) {
     console.error(`[rga-extract] cache hit: ${fileId}`);
@@ -91,6 +93,35 @@ export async function extractText(
           {
             type: "text" as const,
             text: `Error reading file: ${error.message}`,
+          },
+        ],
+      };
+    }
+  } else if (ext === ".pdf" && (pageStart || pageEnd) && !enableOcr) {
+    // PDF 頁面範圍提取：使用 pdftotext (poppler-utils) 直接提取指定頁
+    // 比 rga-preproc 快很多，因為只解析指定頁面
+    const args: string[] = [];
+    if (pageStart) args.push("-f", String(pageStart));
+    if (pageEnd) args.push("-l", String(pageEnd));
+    args.push("-layout", filePath, "-"); // "-" = stdout
+
+    try {
+      console.error(`[rga-extract] pdftotext pages ${pageStart || 1}-${pageEnd || "end"}: ${fileId}`);
+      const { stdout, stderr } = await execFileAsync("pdftotext", args, {
+        maxBuffer: 50 * 1024 * 1024,
+        timeout: 60_000,
+      });
+      if (stderr) {
+        console.error(`[pdftotext stderr] ${stderr}`);
+      }
+      rawText = stdout;
+    } catch (error: any) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: `Error extracting PDF pages: ${error.message}. Ensure poppler-utils is installed.`,
           },
         ],
       };
@@ -160,6 +191,9 @@ export async function extractText(
       const result = {
         file_id: fileId,
         original_name: originalName,
+        ...(pageStart || pageEnd
+          ? { page_range: { start: pageStart || 1, end: pageEnd || "last" } }
+          : {}),
         extracted_text: truncatedText,
         token_stats: {
           full_document_tokens: fullTokenCount,

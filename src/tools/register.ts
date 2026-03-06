@@ -38,9 +38,11 @@ export function registerTools(server: McpServer) {
   // ============================================================
   server.tool(
     "rga_extract_text",
-    "Extract all text content from a file using rga-preproc. " +
+    "Extract text content from a file using rga-preproc. " +
       "Works with uploaded files (by file_id) or files in the mounted /data/documents directory. " +
-      "Returns extracted text with token count estimation.",
+      "Returns extracted text with token count estimation. " +
+      "For PDF files: use page_start/page_end to extract specific pages (much faster for large PDFs). " +
+      "Tip: Use rga_search_content first to find relevant pages, then extract only those pages.",
     {
       file_id: z
         .string()
@@ -61,14 +63,26 @@ export function registerTools(server: McpServer) {
         .describe(
           "Enable OCR for images/scanned PDFs (slower). Default false."
         ),
+      page_start: z
+        .number()
+        .optional()
+        .describe(
+          "PDF only: first page to extract (1-based). Use with page_end for page-range extraction."
+        ),
+      page_end: z
+        .number()
+        .optional()
+        .describe(
+          "PDF only: last page to extract (1-based). Use with page_start for page-range extraction."
+        ),
       response_format: z
         .enum(["json", "markdown"])
         .optional()
         .default("json")
         .describe("Response format: 'json' or 'markdown'"),
     },
-    async ({ file_id, max_tokens, enable_ocr, response_format }) => {
-      return extractText(file_id, max_tokens, enable_ocr, response_format);
+    async ({ file_id, max_tokens, enable_ocr, page_start, page_end, response_format }) => {
+      return extractText(file_id, max_tokens, enable_ocr, response_format, page_start, page_end);
     }
   );
 
