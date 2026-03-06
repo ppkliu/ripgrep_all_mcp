@@ -100,7 +100,12 @@ export async function extractText(
     const args: string[] = [];
     if (enableOcr) {
       args.push("--rga-adapters=+pdfpages,tesseract");
+    } else if (ext === ".pdf") {
+      // PDF 強制使用 poppler adapter (最快，比自動偵測省 2-5s)
+      args.push("--rga-adapters=poppler");
     }
+    // 使用 rga 內建 cache 加速重複提取
+    args.push("--rga-cache-max-blob-len=20M");
     args.push(filePath);
 
     try {

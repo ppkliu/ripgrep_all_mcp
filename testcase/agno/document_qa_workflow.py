@@ -636,9 +636,11 @@ async def _run_agent_question(mcp_tools, model, question: str,
         "若為 PDF 文件，line_number 對應頁碼內的行號，請同時標註檔名。",
         "若從 rga_extract_text 取得內容，標註檔名即可。",
         "",
-        "效能提示:",
+        "效能提示 (兩階段加速策略):",
         "- 如果已知檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
-        "- 如果只需要特定關鍵字，優先用 rga_search_content 而非提取整個檔案",
+        "- 大型文件: 先用 rga_search_content 搜尋關鍵字找到相關段落",
+        "- 小型文件: 直接用 rga_extract_text 提取全文",
+        "- 優先用 rga_search_content 精準搜尋，而非提取整個大文件",
         "- 避免重複呼叫相同工具和相同參數",
     ]
     if summary:
@@ -1121,32 +1123,42 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
         "請用中文回答問題，詳細且準確。",
         "",
         "重要: 回答時必須標註參考來源。格式範例:",
-        "  📄 來源: filename.pdf (第 3 頁, 行 42)",
-        "  📄 來源: report.docx (行 15-20)",
+        "  來源: filename.pdf (第 3 頁, 行 42)",
+        "  來源: report.docx (行 15-20)",
         "根據 rga_search_content 回傳的 file 和 line_number 欄位來標註。",
         "若為 PDF 文件，line_number 對應頁碼內的行號，請同時標註檔名。",
         "若從 rga_extract_text 取得內容，標註檔名即可。",
-        "",
-        "效能提示:",
-        "- 以下文件內容已預先載入，不需要再用 rga_extract_text 提取",
-        "- 如果需要更精確的搜尋，可以用 rga_search_content",
-        "- 避免重複呼叫相同工具和相同參數",
     ]
 
-    # 將預載入的文件內容注入 instructions
+    # 根據預載入結果調整 Agent 策略
     if preloaded_docs:
-        instructions.append("")
-        instructions.append("=" * 40)
-        instructions.append("以下是已預先載入的文件內容:")
-        instructions.append("=" * 40)
+        instructions.extend([
+            "",
+            "效能提示:",
+            "- 以下文件內容已預先載入到 context 中，不需要再用 rga_extract_text 提取",
+            "- 直接根據已載入的文件內容回答問題",
+            "- 如果需要更精確的搜尋，可以用 rga_search_content 補充",
+            "- 避免重複呼叫相同工具和相同參數",
+            "",
+            "=" * 40,
+            "以下是已預先載入的文件內容:",
+            "=" * 40,
+        ])
         for fp, text in preloaded_docs.items():
             instructions.append(f"\n--- 文件: {fp} ---")
             instructions.append(text)
             instructions.append(f"--- 文件結束: {fp} ---\n")
     else:
-        # 沒有預載入的情況，保留原始效能提示
-        instructions[-3] = "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents"
-        instructions[-2] = "- 如果只需要特定關鍵字，優先用 rga_search_content 而非提取整個檔案"
+        instructions.extend([
+            "",
+            "效能提示 (兩階段加速策略):",
+            "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
+            "- 大型文件 (>30頁 PDF): 先用 rga_search_content 搜尋關鍵字找到相關段落，",
+            "  再決定是否需要 rga_extract_text 提取完整內容",
+            "- 小型文件 (<30頁): 直接用 rga_extract_text 提取全文",
+            "- 優先用 rga_search_content 精準搜尋，而非提取整個大文件",
+            "- 避免重複呼叫相同工具和相同參數",
+        ])
 
     agent = Agent(
         name="Document QA Agent",

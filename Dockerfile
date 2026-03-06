@@ -56,6 +56,10 @@ RUN npm install --omit=dev
 RUN mkdir -p /data/uploads /data/cache /data/documents
 ENV RGA_CACHE_DIR=/data/cache
 
+# rga cache 調優 (加速 PDF 重複提取)
+ENV RGA_CACHE_COMPRESSION_LEVEL=6
+ENV RGA_CACHE_MAX_BLOB_LEN=20M
+
 # 環境變數預設值
 ENV MCP_TRANSPORT=stdio
 ENV UPLOAD_DIR=/data/uploads

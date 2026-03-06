@@ -61,7 +61,12 @@ export async function searchContent(
 
   if (enableOcr) {
     args.push("--rga-adapters=+pdfpages,tesseract");
+  } else {
+    // 預設使用 poppler adapter (PDF 最快)
+    args.push("--rga-adapters=poppler");
   }
+  // 使用 rga 內建 cache 加速重複搜尋
+  args.push("--rga-cache-max-blob-len=20M");
 
   args.push(pattern);
   args.push(targetPath);
