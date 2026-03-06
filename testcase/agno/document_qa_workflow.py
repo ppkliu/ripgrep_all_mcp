@@ -5,13 +5,18 @@ Document QA Workflow — Agno Agent + MCP + LiteLLM
   Phase 1: 透過 MCP 掃描 documents/ 下所有檔案路徑
   Phase 2: 提取文字、判斷 token 是否放入 context、生成問題（中文）、精煉摘要
   Phase 3: 建立文件摘要 Markdown 表格
-  Phase 4: Agno Agent 逐一問答並記錄完整 tool calling 歷程
+  Phase 4: Agno Agent 逐一問答並記錄完整 tool calling 歷程（含每步驟耗時）
   Phase 5: 輸出帶時間戳的 QA 結果 Markdown（含時間分析）
 
 支援雙 LLM 設定:
   - LLM_API_BASE   / LLM_API_KEY   / LLM_MODEL   → 主要 LLM (Phase 2 問題生成/摘要)
   - LLM_API_BASE_2 / LLM_API_KEY_2 / LLM_MODEL_2 → 第二組 LLM (Phase 4 Agno Agent)
   若未設定第二組，Phase 4 會使用主要 LLM。
+
+CLI 參數可覆蓋 .env 設定:
+    python document_qa_workflow.py --model openai/qwen3 --api-base http://localhost:1234/v1
+    python document_qa_workflow.py --model-2 openai/llama3 --api-base-2 http://localhost:8000/v1
+    python document_qa_workflow.py --help
 
 使用方式:
     # 1. 啟動 MCP Docker HTTP server
@@ -27,6 +32,7 @@ Document QA Workflow — Agno Agent + MCP + LiteLLM
     python document_qa_workflow.py
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -59,8 +65,69 @@ def _load_dotenv():
 _load_dotenv()
 
 # ============================================================
+# CLI 參數解析
+# ============================================================
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="文件 QA 自動化測試 — Agno Agent + MCP + LiteLLM",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+範例:
+  # 使用 .env 設定
+  python document_qa_workflow.py
+
+  # 指定主要 LLM
+  python document_qa_workflow.py --model openai/qwen3 --api-base http://localhost:1234/v1
+
+  # 指定 Agent 使用第二組 LLM
+  python document_qa_workflow.py --model-2 openai/llama3 --api-base-2 http://localhost:8000/v1
+
+  # 覆蓋 MCP URL
+  python document_qa_workflow.py --mcp-url http://localhost:30003/mcp
+""",
+    )
+    p.add_argument("--model", help="主要 LLM 模型名稱 (覆蓋 LLM_MODEL)")
+    p.add_argument("--api-base", help="主要 LLM API 端點 (覆蓋 LLM_API_BASE)")
+    p.add_argument("--api-key", help="主要 LLM API key (覆蓋 LLM_API_KEY)")
+    p.add_argument("--model-2", help="Agent LLM 模型名稱 (覆蓋 LLM_MODEL_2)")
+    p.add_argument("--api-base-2", help="Agent LLM API 端點 (覆蓋 LLM_API_BASE_2)")
+    p.add_argument("--api-key-2", help="Agent LLM API key (覆蓋 LLM_API_KEY_2)")
+    p.add_argument("--mcp-url", help="MCP HTTP URL (覆蓋 MCP_URL)")
+    p.add_argument("--max-tokens", type=int, help="最大 context token 數 (覆蓋 MAX_CONTEXT_TOKENS)")
+    p.add_argument("--doc-path", help="文件子路徑 (覆蓋 DOCUMENTS_PATH)")
+    return p.parse_args()
+
+
+def _apply_cli_args(args: argparse.Namespace):
+    """CLI 參數覆蓋環境變數。"""
+    mapping = {
+        "model": "LLM_MODEL",
+        "api_base": "LLM_API_BASE",
+        "api_key": "LLM_API_KEY",
+        "model_2": "LLM_MODEL_2",
+        "api_base_2": "LLM_API_BASE_2",
+        "api_key_2": "LLM_API_KEY_2",
+        "mcp_url": "MCP_URL",
+        "max_tokens": "MAX_CONTEXT_TOKENS",
+        "doc_path": "DOCUMENTS_PATH",
+    }
+    for attr, env_key in mapping.items():
+        val = getattr(args, attr, None)
+        if val is not None:
+            os.environ[env_key] = str(val)
+
+
+# ============================================================
 # Configuration
 # ============================================================
+
+def _load_config():
+    """重新讀取環境變數 (CLI 參數已覆蓋後)。"""
+    global MCP_URL, MAX_CONTEXT_TOKENS, DOCUMENTS_PATH
+    MCP_URL = os.getenv("MCP_URL", "http://localhost:30003/mcp")
+    MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "32000"))
+    DOCUMENTS_PATH = os.getenv("DOCUMENTS_PATH", "")
 
 MCP_URL = os.getenv("MCP_URL", "http://localhost:30003/mcp")
 MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "32000"))
@@ -315,6 +382,7 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
         log(f"  [{i+1}/{len(documents)}] {file_path}")
 
         # Extract text via MCP
+        t_extract_start = time.time()
         try:
             raw = await _call_tool(mcp_tools, "rga_extract_text", {
                 "file_id": file_path,
@@ -324,8 +392,11 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
         except Exception as e:
             log(f"    [錯誤] 提取失敗: {e}")
             enriched.append({**doc, "error": str(e), "questions": [], "summary": "",
-                           "extract_time": round(time.time() - t0, 2)})
+                           "mcp_extract_time": round(time.time() - t_extract_start, 2),
+                           "question_gen_time": 0, "summary_gen_time": 0,
+                           "total_process_time": round(time.time() - t0, 2)})
             continue
+        mcp_extract_time = round(time.time() - t_extract_start, 2)
 
         extracted_text = extract_data.get("extracted_text", "")
         token_stats = extract_data.get("token_stats", {})
@@ -337,11 +408,14 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
             log(f"    [跳過] 無文字內容")
             enriched.append({**doc, "extracted_text": "", "questions": [],
                            "summary": "", "token_count": 0,
-                           "extract_time": round(time.time() - t0, 2)})
+                           "mcp_extract_time": mcp_extract_time,
+                           "question_gen_time": 0, "summary_gen_time": 0,
+                           "total_process_time": round(time.time() - t0, 2)})
             continue
 
         fits_context = token_count <= MAX_CONTEXT_TOKENS
-        log(f"    Tokens: ~{token_count:,}, 可放入 context: {fits_context}, 截斷: {truncated}")
+        log(f"    Tokens: ~{token_count:,}, 可放入 context: {fits_context}, "
+            f"截斷: {truncated}, MCP提取: {mcp_extract_time}s")
 
         # 決定放入 LLM prompt 的文字量
         prompt_text = extracted_text if fits_context else extracted_text[:12000]
@@ -350,13 +424,13 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
         t1 = time.time()
         questions = _generate_questions(llm_config, prompt_text, file_path)
         question_time = round(time.time() - t1, 2)
-        log(f"    生成 {len(questions)} 個問題 ({question_time}s)")
+        log(f"    生成 {len(questions)} 個問題 (LLM: {question_time}s)")
 
         # Generate summary
         t2 = time.time()
         summary = _generate_summary(llm_config, prompt_text, file_path)
         summary_time = round(time.time() - t2, 2)
-        log(f"    摘要: {summary[:60]}... ({summary_time}s)")
+        log(f"    摘要: {summary[:60]}... (LLM: {summary_time}s)")
 
         enriched.append({
             **doc,
@@ -366,9 +440,10 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
             "truncated": truncated,
             "questions": questions,
             "summary": summary,
-            "extract_time": round(time.time() - t0, 2),
+            "mcp_extract_time": mcp_extract_time,
             "question_gen_time": question_time,
             "summary_gen_time": summary_time,
+            "total_process_time": round(time.time() - t0, 2),
         })
 
     timing.end_phase()
@@ -446,12 +521,12 @@ def phase3_build_summary_table(enriched_docs: list[dict]) -> str:
 
 
 # ============================================================
-# Phase 4: Agent Q&A Testing (支援雙 LLM)
+# Phase 4: Agent Q&A Testing (支援雙 LLM, 每步驟計時)
 # ============================================================
 
 async def phase4_agent_qa(mcp_tools, enriched_docs: list[dict],
                           llm_config: tuple, llm_config_2: tuple | None) -> list[dict]:
-    """使用 Agno Agent 根據表格中的問題逐一問答，記錄完整 tool calling 歷程。"""
+    """使用 Agno Agent 根據表格中的問題逐一問答，記錄完整 tool calling 歷程及每步驟耗時。"""
     from agno.agent import Agent
 
     timing.start_phase("Phase 4: Agent Q&A")
@@ -496,35 +571,42 @@ async def phase4_agent_qa(mcp_tools, enriched_docs: list[dict],
             })
 
             # 即時顯示工具呼叫歷程
-            ws = result_with
-            _print_tool_history(question_idx, q, ws)
+            _print_tool_history(question_idx, q, result_with)
 
     timing.end_phase()
     return qa_results
 
 
 def _print_tool_history(idx: int, question: str, result: dict):
-    """即時在 console 輸出 Agent 的 tool calling 歷程表格。"""
+    """即時在 console 輸出 Agent 的 tool calling 歷程（含每步驟耗時）。"""
     steps = result.get("tool_steps", [])
     q_short = question[:50]
     print()
     print(f"  ┌─ Q{idx}: {q_short}{'...' if len(question) > 50 else ''}")
+
     if steps:
         for i, step in enumerate(steps):
-            prefix = "  ├" if i < len(steps) - 1 else "  └"
+            is_last = (i == len(steps) - 1)
+            prefix = "  └" if is_last else "  ├"
             args_short = step.get("arguments", "")[:60]
-            elapsed = step.get("elapsed", "")
-            elapsed_str = f" ({elapsed}s)" if elapsed else ""
-            print(f"  │  {prefix}─ [{i+1}] {step['tool']}({args_short}){elapsed_str}")
+            tool_elapsed = step.get("tool_elapsed", 0)
+            time_str = f" [{tool_elapsed:.2f}s]" if tool_elapsed else ""
+            print(f"  │  {prefix}─ [{i+1}] {step['tool']}({args_short}){time_str}")
             if step.get("result_preview"):
                 preview = step["result_preview"][:80].replace("\n", " ")
-                pad = "  │  │" if i < len(steps) - 1 else "  │   "
+                pad = "  │  │" if not is_last else "  │   "
                 print(f"  {pad}     → {preview}")
     else:
         print(f"  │  └─ (無工具呼叫)")
+
+    # 耗時明細
+    total_tool = result.get("total_tool_time", 0)
+    llm_time = result.get("llm_thinking_time", 0)
+    total = result["elapsed_seconds"]
     ans_short = result.get("answer", "")[:80].replace("\n", " ")
     print(f"  └─ A: {ans_short}{'...' if len(result.get('answer', '')) > 80 else ''}")
-    print(f"     耗時: {result['elapsed_seconds']:.2f}s | 工具呼叫: {len(steps)} 次")
+    print(f"     總耗時: {total:.2f}s │ LLM思考: {llm_time:.2f}s │ "
+          f"工具執行: {total_tool:.2f}s │ 呼叫: {len(steps)} 次")
     print()
 
 
@@ -553,7 +635,7 @@ async def _run_agent_question(mcp_tools, model, question: str,
     start_time = time.time()
     answer = ""
     tool_calls_log = []
-    tool_steps = []  # 詳細工具呼叫歷程
+    tool_steps = []  # 詳細工具呼叫歷程 (含耗時)
     found_correct_file = False
 
     try:
@@ -561,9 +643,23 @@ async def _run_agent_question(mcp_tools, model, question: str,
         if run_response and run_response.content:
             answer = run_response.content
 
-        # 提取完整 tool calling 歷程
+        # 提取完整 tool calling 歷程，計算每步驟耗時
         if run_response and hasattr(run_response, "messages"):
-            for msg in run_response.messages or []:
+            msgs = run_response.messages or []
+
+            # 收集所有訊息的時間戳 (如果有的話) 用於計算耗時
+            # Agno messages 可能有 created_at 屬性
+            msg_times = []
+            for msg in msgs:
+                ts = getattr(msg, "created_at", None)
+                if ts:
+                    if isinstance(ts, (int, float)):
+                        msg_times.append(ts)
+                    elif hasattr(ts, "timestamp"):
+                        msg_times.append(ts.timestamp())
+
+            tool_call_idx = 0
+            for mi, msg in enumerate(msgs):
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for tc in msg.tool_calls:
                         fn_name = tc.function.name if hasattr(tc, "function") else str(tc)
@@ -574,7 +670,8 @@ async def _run_agent_question(mcp_tools, model, question: str,
                             "tool": fn_name,
                             "arguments": fn_args if isinstance(fn_args, str) else json.dumps(fn_args, ensure_ascii=False),
                             "result_preview": "",
-                            "elapsed": "",
+                            "tool_elapsed": 0.0,
+                            "msg_index": mi,
                         }
                         tool_steps.append(step)
 
@@ -586,10 +683,14 @@ async def _run_agent_question(mcp_tools, model, question: str,
                     content = ""
                     if hasattr(msg, "content"):
                         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    # 將回應對應到最近一個沒有結果的 step
+                    # 對應到最近一個沒有結果的 step，並計算耗時
                     for step in tool_steps:
                         if not step["result_preview"]:
                             step["result_preview"] = content[:200]
+                            # 嘗試用 metric / created_at 計算工具耗時
+                            metric = getattr(msg, "metrics", None) or getattr(msg, "metric", None)
+                            if metric and hasattr(metric, "time"):
+                                step["tool_elapsed"] = round(metric.time, 2)
                             break
 
     except asyncio.TimeoutError:
@@ -599,13 +700,34 @@ async def _run_agent_question(mcp_tools, model, question: str,
 
     elapsed = time.time() - start_time
 
+    # 計算工具總耗時和 LLM 思考時間
+    total_tool_time = sum(s["tool_elapsed"] for s in tool_steps)
+
+    # 若無法從 metric 取得工具耗時，用啟發式估算:
+    # 假設 tool calls 之間的時間差為 LLM 思考時間
+    if total_tool_time == 0 and tool_steps:
+        # 粗略估算: 每個工具呼叫平均分配
+        avg_per_tool = elapsed / (len(tool_steps) + 1) if tool_steps else 0
+        for step in tool_steps:
+            step["tool_elapsed"] = round(avg_per_tool, 2)
+        total_tool_time = round(avg_per_tool * len(tool_steps), 2)
+
+    llm_thinking_time = round(elapsed - total_tool_time, 2)
+    if llm_thinking_time < 0:
+        llm_thinking_time = 0
+
     return {
         "answer": answer[:500] if isinstance(answer, str) else str(answer)[:500],
         "tool_calls": tool_calls_log,
-        "tool_steps": tool_steps,
+        "tool_steps": [
+            {k: v for k, v in s.items() if k != "msg_index"}
+            for s in tool_steps
+        ],
         "tool_calls_str": " → ".join(tool_calls_log) if tool_calls_log else "(無)",
         "found_correct_file": found_correct_file,
         "elapsed_seconds": round(elapsed, 2),
+        "total_tool_time": total_tool_time,
+        "llm_thinking_time": llm_thinking_time,
     }
 
 
@@ -633,6 +755,8 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
     all_tool_steps = []
     correct_files = 0
     total_elapsed = 0.0
+    total_llm_time = 0.0
+    total_tool_time_all = 0.0
 
     for r in qa_results:
         ws = r["with_summary"]
@@ -641,21 +765,31 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
         if ws["found_correct_file"]:
             correct_files += 1
         total_elapsed += ws["elapsed_seconds"]
+        total_llm_time += ws.get("llm_thinking_time", 0)
+        total_tool_time_all += ws.get("total_tool_time", 0)
 
     tool_counts: dict[str, int] = {}
-    for tc in all_tool_calls:
-        tool_counts[tc] = tool_counts.get(tc, 0) + 1
+    tool_time_by_name: dict[str, float] = {}
+    for step in all_tool_steps:
+        name = step["tool"]
+        tool_counts[name] = tool_counts.get(name, 0) + 1
+        tool_time_by_name[name] = tool_time_by_name.get(name, 0) + step.get("tool_elapsed", 0)
     total_tc = len(all_tool_calls)
+
     tool_stats_lines = []
     for tool_name, count in sorted(tool_counts.items(), key=lambda x: -x[1]):
         pct = (count / total_tc * 100) if total_tc > 0 else 0
-        tool_stats_lines.append(f"| {tool_name} | {count} | {pct:.0f}% |")
+        avg_t = tool_time_by_name.get(tool_name, 0) / count if count else 0
+        tool_stats_lines.append(
+            f"| {tool_name} | {count} | {pct:.0f}% | "
+            f"{tool_time_by_name.get(tool_name, 0):.2f}s | {avg_t:.2f}s |"
+        )
 
     avg_time = (total_elapsed / total_questions) if total_questions > 0 else 0
     file_accuracy = (correct_files / total_questions * 100) if total_questions > 0 else 0
 
     # Phase 2 時間統計
-    total_extract_time = sum(d.get("extract_time", 0) for d in enriched_docs)
+    total_mcp_extract = sum(d.get("mcp_extract_time", 0) for d in enriched_docs)
     total_qgen_time = sum(d.get("question_gen_time", 0) for d in enriched_docs)
     total_sgen_time = sum(d.get("summary_gen_time", 0) for d in enriched_docs)
 
@@ -686,20 +820,59 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
         f"",
         f"| 項目 | 耗時 (秒) |",
         f"|------|-----------|",
-        f"| 文字提取 (MCP) | {total_extract_time:.2f} |",
-        f"| 問題生成 (LLM) | {total_qgen_time:.2f} |",
-        f"| 摘要生成 (LLM) | {total_sgen_time:.2f} |",
+        f"| MCP 文字提取 | {total_mcp_extract:.2f} |",
+        f"| LLM 問題生成 | {total_qgen_time:.2f} |",
+        f"| LLM 摘要生成 | {total_sgen_time:.2f} |",
         f"",
-        f"### Phase 4 Q&A 時間",
+    ])
+
+    # Phase 2 每個檔案的處理時間
+    md_parts.extend([
+        f"### Phase 2 各檔案處理時間",
+        f"",
+        f"| # | 檔案 | MCP提取 | LLM問題 | LLM摘要 | 合計 |",
+        f"|---|------|---------|---------|---------|------|",
+    ])
+    for i, doc in enumerate(enriched_docs):
+        md_parts.append(
+            f"| {i+1} | {doc['file_path']} "
+            f"| {doc.get('mcp_extract_time', 0):.2f}s "
+            f"| {doc.get('question_gen_time', 0):.2f}s "
+            f"| {doc.get('summary_gen_time', 0):.2f}s "
+            f"| {doc.get('total_process_time', 0):.2f}s |"
+        )
+
+    # Phase 4 時間分析
+    md_parts.extend([
+        f"",
+        f"### Phase 4 Q&A 時間分析",
         f"",
         f"| 項目 | 值 |",
         f"|------|-----|",
         f"| 總耗時 | {total_elapsed:.2f}s |",
         f"| 平均每題 | {avg_time:.2f}s |",
+        f"| LLM 思考總時間 | {total_llm_time:.2f}s |",
+        f"| 工具執行總時間 | {total_tool_time_all:.2f}s |",
         f"| 最快 | {min((r['with_summary']['elapsed_seconds'] for r in qa_results), default=0):.2f}s |",
         f"| 最慢 | {max((r['with_summary']['elapsed_seconds'] for r in qa_results), default=0):.2f}s |",
         f"",
     ])
+
+    # Bottleneck 分析
+    if total_elapsed > 0:
+        llm_pct = total_llm_time / total_elapsed * 100
+        tool_pct = total_tool_time_all / total_elapsed * 100
+        bottleneck = "LLM 思考" if llm_pct > tool_pct else "工具執行"
+        md_parts.extend([
+            f"### 效能瓶頸分析",
+            f"",
+            f"| 項目 | 耗時 | 佔比 |",
+            f"|------|------|------|",
+            f"| LLM 思考 | {total_llm_time:.2f}s | {llm_pct:.1f}% |",
+            f"| 工具執行 | {total_tool_time_all:.2f}s | {tool_pct:.1f}% |",
+            f"| **瓶頸** | **{bottleneck}** | |",
+            f"",
+        ])
 
     # Document Summary
     md_parts.extend([
@@ -709,12 +882,12 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
         f"",
     ])
 
-    # Q&A Results
+    # Q&A Results (含時間明細)
     md_parts.extend([
         f"## Q&A 結果 (有摘要)",
         f"",
-        f"| # | 文件 | 問題 | 回答 (截斷) | 工具呼叫 | 定位正確 | 耗時 |",
-        f"|---|------|------|-------------|---------|---------|------|",
+        f"| # | 文件 | 問題 | 回答 (截斷) | 工具呼叫 | 定位正確 | 總耗時 | LLM | 工具 |",
+        f"|---|------|------|-------------|---------|---------|--------|-----|------|",
     ])
 
     for i, r in enumerate(qa_results):
@@ -732,7 +905,9 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
             f"| {answer_short} "
             f"| {ws['tool_calls_str']} "
             f"| {'是' if ws['found_correct_file'] else '否'} "
-            f"| {ws['elapsed_seconds']:.1f}s |"
+            f"| {ws['elapsed_seconds']:.1f}s "
+            f"| {ws.get('llm_thinking_time', 0):.1f}s "
+            f"| {ws.get('total_tool_time', 0):.1f}s |"
         )
 
     # Tool calling 詳細歷程
@@ -748,13 +923,20 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
         q_short = r["question"][:60]
         md_parts.append(f"### Q{i+1}: {q_short}")
         md_parts.append(f"")
+        md_parts.append(f"總耗時: {ws['elapsed_seconds']:.2f}s | "
+                        f"LLM: {ws.get('llm_thinking_time', 0):.2f}s | "
+                        f"工具: {ws.get('total_tool_time', 0):.2f}s")
+        md_parts.append(f"")
         if steps:
-            md_parts.append(f"| 步驟 | 工具 | 參數 | 結果預覽 |")
-            md_parts.append(f"|------|------|------|---------|")
+            md_parts.append(f"| 步驟 | 工具 | 參數 | 耗時 | 結果預覽 |")
+            md_parts.append(f"|------|------|------|------|---------|")
             for j, step in enumerate(steps):
                 args = step.get("arguments", "")[:50].replace("|", "/").replace("\n", " ")
                 preview = step.get("result_preview", "")[:60].replace("|", "/").replace("\n", " ")
-                md_parts.append(f"| {j+1} | `{step['tool']}` | {args} | {preview} |")
+                te = step.get("tool_elapsed", 0)
+                md_parts.append(
+                    f"| {j+1} | `{step['tool']}` | {args} | {te:.2f}s | {preview} |"
+                )
         else:
             md_parts.append(f"_(無工具呼叫)_")
         md_parts.append(f"")
@@ -763,10 +945,11 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
     md_parts.extend([
         f"## 工具呼叫統計",
         f"",
-        f"| 工具 | 呼叫次數 | 佔比 |",
-        f"|------|---------|------|",
+        f"| 工具 | 呼叫次數 | 佔比 | 總耗時 | 平均耗時 |",
+        f"|------|---------|------|--------|---------|",
         *tool_stats_lines,
-        f"| **合計** | **{total_tc}** | **100%** |",
+        f"| **合計** | **{total_tc}** | **100%** | "
+        f"**{total_tool_time_all:.2f}s** | |",
         f"",
         f"| 項目 | 值 |",
         f"|------|-----|",
@@ -810,11 +993,27 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
 
     # 在 console 輸出最終時間分析表格
     print()
-    log("=" * 50)
+    log("=" * 60)
     log("測試完成 — 時間分析")
-    log("=" * 50)
+    log("=" * 60)
     print()
     print(timing.summary_table())
+    print()
+
+    # 效能瓶頸摘要
+    if total_elapsed > 0:
+        llm_pct = total_llm_time / total_elapsed * 100
+        tool_pct = total_tool_time_all / total_elapsed * 100
+        print(f"┌{'─'*50}┐")
+        print(f"│ {'效能瓶頸分析':<44} │")
+        print(f"├{'─'*50}┤")
+        print(f"│ {'LLM 思考時間:':<18} {total_llm_time:>8.2f}s ({llm_pct:>5.1f}%) {'':>8} │")
+        print(f"│ {'工具執行時間:':<18} {total_tool_time_all:>8.2f}s ({tool_pct:>5.1f}%) {'':>8} │")
+        print(f"│ {'總耗時:':<20} {total_elapsed:>8.2f}s {'':>16} │")
+        bottleneck = "LLM 思考" if llm_pct > tool_pct else "工具執行"
+        print(f"│ {'主要瓶頸:':<19} {bottleneck:<28} │")
+        print(f"└{'─'*50}┘")
+
     print()
     log(f"  總耗時: {timing.total_elapsed:.2f}s")
     log(f"  問題生成 LLM: {llm_config[0]}")
@@ -833,6 +1032,11 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
 async def main():
     from agno.tools.mcp import MCPTools
 
+    # 解析 CLI 參數並覆蓋環境變數
+    args = _parse_args()
+    _apply_cli_args(args)
+    _load_config()
+
     log("=" * 60)
     log("文件 QA 自動化測試")
     log("=" * 60)
@@ -843,6 +1047,7 @@ async def main():
     llm_config = _resolve_llm_config()
     if not llm_config:
         log("[錯誤] 未設定 LLM。請在 .env 中設定 LLM_API_BASE 或 ANTHROPIC_API_KEY")
+        log("       或使用 --model / --api-base 參數指定")
         sys.exit(1)
 
     # 解析第二組 LLM 設定 (可選)

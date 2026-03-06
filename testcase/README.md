@@ -267,23 +267,41 @@ source testcase/agno/.venv/bin/activate
 cd testcase/agno
 cp .env.example .env     # 編輯填入 LLM_API_BASE / LLM_API_KEY 等
 
-# 4. 執行
-python document_qa_workflow.py
+# 4. 執行 (三種方式)
+python document_qa_workflow.py                    # 使用 .env 設定
+python document_qa_workflow.py --model openai/qwen3 --api-base http://localhost:1234/v1  # CLI 指定
+python document_qa_workflow.py --help             # 查看所有參數
 ```
 
 > **環境變數**: QA workflow 支援 `LLM_*` 和 `LITELLM_*` 兩組變數名稱（`LLM_*` 優先）。
 > 未設定 `LLM_MODEL` 時會自動從 API `/v1/models` 端點偵測可用模型。
 
-**雙 LLM 模式**（選填）：設定 `LLM_API_BASE_2` 可讓 Phase 4 Agent 使用不同的 LLM，
-方便比較不同模型的 tool calling 能力：
+**CLI 參數**（覆蓋 `.env` 設定）：
+
+| 參數 | 說明 | 對應環境變數 |
+|------|------|-------------|
+| `--model` | 主要 LLM 模型名稱 | `LLM_MODEL` |
+| `--api-base` | 主要 LLM API 端點 | `LLM_API_BASE` |
+| `--api-key` | 主要 LLM API key | `LLM_API_KEY` |
+| `--model-2` | Agent LLM 模型名稱 | `LLM_MODEL_2` |
+| `--api-base-2` | Agent LLM API 端點 | `LLM_API_BASE_2` |
+| `--api-key-2` | Agent LLM API key | `LLM_API_KEY_2` |
+| `--mcp-url` | MCP HTTP URL | `MCP_URL` |
+| `--max-tokens` | 最大 context token 數 | `MAX_CONTEXT_TOKENS` |
+| `--doc-path` | 文件子路徑 | `DOCUMENTS_PATH` |
+
+**雙 LLM 模式**（選填）：設定 `--model-2` / `--api-base-2` 或 `LLM_API_BASE_2` 可讓 Phase 4 Agent 使用不同的 LLM，方便比較不同模型的 tool calling 能力：
 ```bash
-# .env 中加入第二組 LLM
+# CLI 方式
+python document_qa_workflow.py --model-2 openai/llama3 --api-base-2 http://localhost:8000/v1
+
+# 或 .env 方式
 LLM_API_BASE_2=http://localhost:8000/v1
 LLM_API_KEY_2=no-key
 # LLM_MODEL_2=openai/your-agent-model   # 選填，未設定時自動偵測
 ```
 
-進階設定（`.env` 或 export）：
+進階設定（`.env`、export 或 CLI）：
 ```bash
 MCP_URL=http://localhost:30003/mcp      # MCP HTTP URL (預設)
 MAX_CONTEXT_TOKENS=32000                # 最大上下文 token 數
@@ -302,10 +320,11 @@ DOCUMENTS_PATH=subfolder                # 指定文件子路徑
 
 結果會自動輸出到 `testcase/agno/qa_results/qa_YYYYMMDD_HHMMSS.md`，包含：
 - 測試環境設定表格
-- 各階段時間分析 (Phase 耗時、佔比)
+- 各階段時間分析 (Phase 耗時、佔比、Phase 2/4 細項)
+- 效能瓶頸分析 (LLM 思考 vs 工具執行時間佔比)
 - 文件摘要表格
-- 每題的回答、工具呼叫歷程、回應時間
-- 工具呼叫統計 (呼叫次數、佔比)
+- 每題的回答、工具呼叫歷程 (含每步驟耗時)、LLM/工具時間明細
+- 工具呼叫統計 (呼叫次數、佔比、總耗時、平均耗時)
 - 摘要 Context 對照比較
 
 ## 環境變數
