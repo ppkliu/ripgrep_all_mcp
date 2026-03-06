@@ -13,6 +13,13 @@ const execFileAsync = promisify(execFile);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "/data/uploads";
 const DOCUMENTS_DIR = process.env.DOCUMENTS_DIR || "/data/documents";
 
+// 提取結果快取 (避免對同一檔案重複執行 rga-preproc)
+const extractCache = new Map<
+  string,
+  { result: { content: { type: "text"; text: string }[] }; ts: number }
+>();
+const EXTRACT_CACHE_TTL = 300_000; // 5 分鐘
+
 // rga-preproc 沒有 adapter 的純文字格式，直接讀取
 const PLAINTEXT_EXTENSIONS = new Set([
   ".txt", ".md", ".json", ".xml", ".yaml", ".yml",
@@ -27,6 +34,14 @@ export async function extractText(
   enableOcr: boolean,
   responseFormat: string
 ) {
+  // 快取檢查
+  const cacheKey = `${fileId}:${maxTokens}:${enableOcr}:${responseFormat}`;
+  const cached = extractCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < EXTRACT_CACHE_TTL) {
+    console.error(`[rga-extract] cache hit: ${fileId}`);
+    return cached.result;
+  }
+
   // 先在 uploads 目錄找，再在 documents 目錄找
   let filePath = path.join(UPLOAD_DIR, fileId);
   let originalName = fileId;
@@ -117,6 +132,8 @@ export async function extractText(
     const returnedTokenCount = countTokens(truncatedText);
     const wasTruncated = fullTokenCount > returnedTokenCount;
 
+    let output: { content: { type: "text"; text: string }[] };
+
     if (responseFormat === "markdown") {
       const md = [
         `## Extracted Text: ${originalName}`,
@@ -132,32 +149,34 @@ export async function extractText(
         "```",
       ].join("\n");
 
-      return {
-        content: [{ type: "text" as const, text: md }],
+      output = { content: [{ type: "text" as const, text: md }] };
+    } else {
+      // JSON format (default)
+      const result = {
+        file_id: fileId,
+        original_name: originalName,
+        extracted_text: truncatedText,
+        token_stats: {
+          full_document_tokens: fullTokenCount,
+          returned_tokens: returnedTokenCount,
+          max_tokens_requested: maxTokens,
+          truncated: wasTruncated,
+          note: wasTruncated
+            ? `Document was truncated from ${fullTokenCount} to ${returnedTokenCount} tokens. Use rga_search_content for targeted retrieval.`
+            : "Full document returned.",
+        },
+      };
+
+      output = {
+        content: [
+          { type: "text" as const, text: JSON.stringify(result, null, 2) },
+        ],
       };
     }
 
-    // JSON format (default)
-    const result = {
-      file_id: fileId,
-      original_name: originalName,
-      extracted_text: truncatedText,
-      token_stats: {
-        full_document_tokens: fullTokenCount,
-        returned_tokens: returnedTokenCount,
-        max_tokens_requested: maxTokens,
-        truncated: wasTruncated,
-        note: wasTruncated
-          ? `Document was truncated from ${fullTokenCount} to ${returnedTokenCount} tokens. Use rga_search_content for targeted retrieval.`
-          : "Full document returned.",
-      },
-    };
-
-    return {
-      content: [
-        { type: "text" as const, text: JSON.stringify(result, null, 2) },
-      ],
-    };
+    // 寫入快取
+    extractCache.set(cacheKey, { result: output, ts: Date.now() });
+    return output;
   } catch (error: any) {
     return {
       isError: true,

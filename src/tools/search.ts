@@ -12,6 +12,13 @@ const execFileAsync = promisify(execFile);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "/data/uploads";
 const DOCUMENTS_DIR = process.env.DOCUMENTS_DIR || "/data/documents";
 
+// 搜尋結果快取
+const searchCache = new Map<
+  string,
+  { result: { content: { type: "text"; text: string }[] }; ts: number }
+>();
+const SEARCH_CACHE_TTL = 120_000; // 2 分鐘
+
 export async function searchContent(
   pattern: string,
   fileId: string | undefined,
@@ -23,6 +30,14 @@ export async function searchContent(
   enableOcr: boolean,
   responseFormat: string
 ) {
+  // 快取檢查
+  const cacheKey = `${pattern}:${fileId}:${searchPath}:${caseInsensitive}:${contextLines}:${maxMatches}:${maxTokens}:${enableOcr}:${responseFormat}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL) {
+    console.error(`[rga-search] cache hit: ${pattern}`);
+    return cached.result;
+  }
+
   // 決定搜尋路徑
   let targetPath: string;
   if (fileId) {
@@ -92,6 +107,8 @@ export async function searchContent(
     const truncated = truncateToTokenLimit(resultText, maxTokens);
     const returnedTokens = countTokens(truncated);
 
+    let output: { content: { type: "text"; text: string }[] };
+
     if (responseFormat === "markdown") {
       const md = [
         `## Search Results: \`${pattern}\``,
@@ -104,29 +121,31 @@ export async function searchContent(
             `### Match ${i + 1} — ${m.file}:${m.line_number}\n\`\`\`\n${m.text}\n\`\`\``
         ),
       ].join("\n");
-      return {
-        content: [{ type: "text" as const, text: md }],
+      output = { content: [{ type: "text" as const, text: md }] };
+    } else {
+      const result = {
+        pattern,
+        total_matches: matches.length,
+        search_path: fileId || searchPath || "all_documents",
+        results: matches,
+        token_stats: {
+          full_result_tokens: fullTokens,
+          returned_tokens: returnedTokens,
+          max_tokens_requested: maxTokens,
+          truncated: fullTokens > returnedTokens,
+        },
+      };
+
+      output = {
+        content: [
+          { type: "text" as const, text: JSON.stringify(result, null, 2) },
+        ],
       };
     }
 
-    const result = {
-      pattern,
-      total_matches: matches.length,
-      search_path: fileId || searchPath || "all_documents",
-      results: matches,
-      token_stats: {
-        full_result_tokens: fullTokens,
-        returned_tokens: returnedTokens,
-        max_tokens_requested: maxTokens,
-        truncated: fullTokens > returnedTokens,
-      },
-    };
-
-    return {
-      content: [
-        { type: "text" as const, text: JSON.stringify(result, null, 2) },
-      ],
-    };
+    // 寫入快取
+    searchCache.set(cacheKey, { result: output, ts: Date.now() });
+    return output;
   } catch (error: any) {
     // rga exit code 1 = no matches
     if (error.code === 1) {

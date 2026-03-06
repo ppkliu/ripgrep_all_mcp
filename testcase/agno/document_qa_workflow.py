@@ -635,6 +635,11 @@ async def _run_agent_question(mcp_tools, model, question: str,
         "根據 rga_search_content 回傳的 file 和 line_number 欄位來標註。",
         "若為 PDF 文件，line_number 對應頁碼內的行號，請同時標註檔名。",
         "若從 rga_extract_text 取得內容，標註檔名即可。",
+        "",
+        "效能提示:",
+        "- 如果已知檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
+        "- 如果只需要特定關鍵字，優先用 rga_search_content 而非提取整個檔案",
+        "- 避免重複呼叫相同工具和相同參數",
     ]
     if summary:
         instructions.append(f"相關文件: '{file_path}'。摘要: {summary}")
@@ -1063,6 +1068,11 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
         "根據 rga_search_content 回傳的 file 和 line_number 欄位來標註。",
         "若為 PDF 文件，line_number 對應頁碼內的行號，請同時標註檔名。",
         "若從 rga_extract_text 取得內容，標註檔名即可。",
+        "",
+        "效能提示:",
+        "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
+        "- 如果只需要特定關鍵字，優先用 rga_search_content 而非提取整個檔案",
+        "- 避免重複呼叫相同工具和相同參數",
     ]
 
     agent = Agent(
@@ -1229,6 +1239,8 @@ async def main():
             log("[錯誤] --use-model 2 但未設定第二組 LLM (LLM_API_BASE_2)")
             sys.exit(1)
         agent_config = llm_config_2
+    elif args.use_model == "1":
+        agent_config = llm_config
     else:
         agent_config = llm_config_2 or llm_config
 
