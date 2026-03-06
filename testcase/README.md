@@ -274,6 +274,15 @@ python document_qa_workflow.py
 > **環境變數**: QA workflow 支援 `LLM_*` 和 `LITELLM_*` 兩組變數名稱（`LLM_*` 優先）。
 > 未設定 `LLM_MODEL` 時會自動從 API `/v1/models` 端點偵測可用模型。
 
+**雙 LLM 模式**（選填）：設定 `LLM_API_BASE_2` 可讓 Phase 4 Agent 使用不同的 LLM，
+方便比較不同模型的 tool calling 能力：
+```bash
+# .env 中加入第二組 LLM
+LLM_API_BASE_2=http://localhost:8000/v1
+LLM_API_KEY_2=no-key
+# LLM_MODEL_2=openai/your-agent-model   # 選填，未設定時自動偵測
+```
+
 進階設定（`.env` 或 export）：
 ```bash
 MCP_URL=http://localhost:30003/mcp      # MCP HTTP URL (預設)
@@ -285,25 +294,30 @@ DOCUMENTS_PATH=subfolder                # 指定文件子路徑
 
 | 階段 | 說明 |
 |------|------|
-| Phase 1 | 透過 MCP `rga_list_documents` 列出所有文件 |
-| Phase 2 | 對每個文件提取文字、用 LLM 生成 5-10 個問題、建立摘要 |
+| Phase 1 | 透過 MCP 掃描 documents/ 下所有檔案路徑 (表格化輸出) |
+| Phase 2 | 提取文字、判斷 token 是否放入 context、生成中文問題、精煉摘要 |
 | Phase 3 | 產生文件摘要 Markdown 表格 |
-| Phase 4 | Agno Agent 逐一回答問題，分別測試「有摘要」和「無摘要」兩種情境 |
-| Phase 5 | 輸出帶時間戳的 QA 結果 Markdown |
+| Phase 4 | Agno Agent 逐一問答 (支援雙 LLM)，即時顯示 tool calling 歷程 |
+| Phase 5 | 輸出帶時間戳的 QA 結果 Markdown + 時間分析 |
 
 結果會自動輸出到 `testcase/agno/qa_results/qa_YYYYMMDD_HHMMSS.md`，包含：
+- 測試環境設定表格
+- 各階段時間分析 (Phase 耗時、佔比)
 - 文件摘要表格
-- 每題的回答、tool calling 記錄、回應時間
-- Tool calling 分析統計
-- Summary Context 對照比較
+- 每題的回答、工具呼叫歷程、回應時間
+- 工具呼叫統計 (呼叫次數、佔比)
+- 摘要 Context 對照比較
 
 ## 環境變數
 
 | 變數 | 用途 | 預設值 |
 |------|------|--------|
-| `LLM_API_BASE` | OpenAI-compatible API 端點 | (無) |
-| `LLM_API_KEY` | OpenAI-compatible API key | `no-key` |
-| `LLM_MODEL` | LLM 模型名稱 (litellm 格式)，未設定時自動偵測 | 依 provider 自動選擇 |
+| `LLM_API_BASE` | 主要 LLM — OpenAI-compatible API 端點 | (無) |
+| `LLM_API_KEY` | 主要 LLM — API key | `no-key` |
+| `LLM_MODEL` | 主要 LLM — 模型名稱，未設定時自動偵測 | 依 provider 自動選擇 |
+| `LLM_API_BASE_2` | 第二組 LLM — Agent 用 (選填，未設定用主要) | (無) |
+| `LLM_API_KEY_2` | 第二組 LLM — API key | `no-key` |
+| `LLM_MODEL_2` | 第二組 LLM — 模型名稱，未設定時自動偵測 | (無) |
 | `ANTHROPIC_API_KEY` | Anthropic API key | (無) |
 | `LITELLM_MODEL` | `LLM_MODEL` 的別名 (向下相容) | (無) |
 | `LITELLM_API_BASE` | `LLM_API_BASE` 的別名 (向下相容) | (無) |

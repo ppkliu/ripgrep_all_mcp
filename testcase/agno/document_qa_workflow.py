@@ -3,10 +3,15 @@ Document QA Workflow — Agno Agent + MCP + LiteLLM
 
 自動化文件問答測試流程:
   Phase 1: 透過 MCP 掃描 documents/ 下所有檔案路徑
-  Phase 2: 提取文字、判斷 token 是否放入 context、生成問題、精煉摘要
+  Phase 2: 提取文字、判斷 token 是否放入 context、生成問題（中文）、精煉摘要
   Phase 3: 建立文件摘要 Markdown 表格
-  Phase 4: Agno Agent 逐一問答並記錄 tool calling
-  Phase 5: 輸出帶時間戳的 QA 結果 Markdown
+  Phase 4: Agno Agent 逐一問答並記錄完整 tool calling 歷程
+  Phase 5: 輸出帶時間戳的 QA 結果 Markdown（含時間分析）
+
+支援雙 LLM 設定:
+  - LLM_API_BASE   / LLM_API_KEY   / LLM_MODEL   → 主要 LLM (Phase 2 問題生成/摘要)
+  - LLM_API_BASE_2 / LLM_API_KEY_2 / LLM_MODEL_2 → 第二組 LLM (Phase 4 Agno Agent)
+  若未設定第二組，Phase 4 會使用主要 LLM。
 
 使用方式:
     # 1. 啟動 MCP Docker HTTP server
@@ -69,6 +74,54 @@ SUPPORTED_EXTENSIONS = {
     ".pptx", ".xlsx", ".zip", ".tar", ".gz",
 }
 
+# ============================================================
+# Timing tracker
+# ============================================================
+
+class TimingTracker:
+    """追蹤各 Phase 及整體執行時間。"""
+
+    def __init__(self):
+        self.workflow_start: float = 0
+        self.workflow_end: float = 0
+        self.phases: list[dict] = []
+        self._phase_start: float = 0
+
+    def start_workflow(self):
+        self.workflow_start = time.time()
+
+    def end_workflow(self):
+        self.workflow_end = time.time()
+
+    def start_phase(self, name: str):
+        self._phase_start = time.time()
+        self.phases.append({"name": name, "start": self._phase_start, "end": 0, "elapsed": 0})
+
+    def end_phase(self):
+        now = time.time()
+        if self.phases:
+            self.phases[-1]["end"] = now
+            self.phases[-1]["elapsed"] = round(now - self.phases[-1]["start"], 2)
+
+    @property
+    def total_elapsed(self) -> float:
+        return round(self.workflow_end - self.workflow_start, 2)
+
+    def summary_table(self) -> str:
+        lines = [
+            "| 階段 | 耗時 (秒) | 佔比 |",
+            "|------|-----------|------|",
+        ]
+        total = self.total_elapsed or 1
+        for p in self.phases:
+            pct = p["elapsed"] / total * 100
+            lines.append(f"| {p['name']} | {p['elapsed']:.2f} | {pct:.1f}% |")
+        lines.append(f"| **合計** | **{total:.2f}** | **100%** |")
+        return "\n".join(lines)
+
+
+timing = TimingTracker()
+
 
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -89,41 +142,58 @@ def _detect_model_from_api(api_base: str, api_key: str) -> str:
         models = resp.json().get("data", [])
         if models:
             name = models[0].get("id", "")
-            log(f"  Auto-detected model: {name}")
+            log(f"  自動偵測模型: {name}")
             if len(models) > 1:
                 all_names = [m.get("id", "") for m in models]
-                log(f"  Available models: {all_names}")
+                log(f"  可用模型: {all_names}")
             return f"openai/{name}"
     except Exception as e:
-        log(f"  Cannot query {models_url}: {e}")
+        log(f"  無法查詢 {models_url}: {e}")
     return ""
 
 
-def _resolve_llm_config() -> tuple:
+def _resolve_llm_config(suffix: str = "") -> tuple | None:
     """
     回傳 (model_id, api_base, api_key)。
 
-    支援兩組環境變數 (優先順序):
-      1. LLM_API_BASE / LLM_API_KEY / LLM_MODEL
-      2. LITELLM_API_BASE / LITELLM_API_KEY / LITELLM_MODEL
-      3. ANTHROPIC_API_KEY / LLM_MODEL
+    suffix="" → 主要 LLM (LLM_API_BASE)
+    suffix="2" → 第二組 LLM (LLM_API_BASE_2)
+
+    優先順序:
+      1. LLM_API_BASE{suffix} / LLM_API_KEY{suffix} / LLM_MODEL{suffix}
+      2. (suffix="" only) LITELLM_API_BASE / LITELLM_API_KEY / LITELLM_MODEL
+      3. (suffix="" only) ANTHROPIC_API_KEY / LLM_MODEL
 
     模型自動偵測: LLM_MODEL 未設定時查詢 /v1/models。
     """
-    # 統一讀取: LLM_* 優先，LITELLM_* 作為 fallback
-    api_base = os.getenv("LLM_API_BASE") or os.getenv("LITELLM_API_BASE")
-    api_key = os.getenv("LLM_API_KEY") or os.getenv("LITELLM_API_KEY", "no-key")
-    model_id = os.getenv("LLM_MODEL") or os.getenv("LITELLM_MODEL", "")
+    s = f"_{suffix}" if suffix else ""
+
+    api_base = os.getenv(f"LLM_API_BASE{s}")
+    api_key = os.getenv(f"LLM_API_KEY{s}")
+    model_id = os.getenv(f"LLM_MODEL{s}", "")
+
+    # 主要 LLM fallback: LITELLM_*
+    if not suffix:
+        api_base = api_base or os.getenv("LITELLM_API_BASE")
+        api_key = api_key or os.getenv("LITELLM_API_KEY")
+        model_id = model_id or os.getenv("LITELLM_MODEL", "")
+
+    if api_key is None:
+        api_key = "no-key"
 
     if api_base:
         if not model_id:
             model_id = _detect_model_from_api(api_base, api_key)
         if not model_id:
-            log("[ERROR] Cannot detect model. Set LLM_MODEL in .env")
+            log(f"[ERROR] 無法偵測模型。請在 .env 中設定 LLM_MODEL{s}")
             return None
         if "/" not in model_id:
             model_id = f"openai/{model_id}"
         return (model_id, api_base, api_key)
+
+    # 第二組未設定 → 回傳 None (由呼叫者 fallback 到主要)
+    if suffix:
+        return None
 
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     if anthropic_key:
@@ -178,7 +248,8 @@ async def _call_tool(mcp_tools, name: str, arguments: dict) -> str:
 
 async def phase1_discover_documents(mcp_tools) -> list[dict]:
     """透過 MCP rga_list_documents 遞迴掃描所有檔案。"""
-    log("Phase 1: Discovering documents...")
+    timing.start_phase("Phase 1: 文件掃描")
+    log("Phase 1: 掃描文件目錄...")
 
     result = await _call_tool(mcp_tools, "rga_list_documents", {
         "path": DOCUMENTS_PATH,
@@ -189,10 +260,20 @@ async def phase1_discover_documents(mcp_tools) -> list[dict]:
     documents = []
     _collect_files(data.get("entries", []), DOCUMENTS_PATH, documents)
 
-    log(f"  Found {len(documents)} files")
-    for doc in documents:
-        log(f"    - {doc['file_path']} ({doc.get('size_human', '?')})")
+    # 表格化輸出
+    print()
+    print(f"┌{'─'*4}┬{'─'*40}┬{'─'*12}┐")
+    print(f"│ {'#':>2} │ {'檔案路徑':<38} │ {'大小':>10} │")
+    print(f"├{'─'*4}┼{'─'*40}┼{'─'*12}┤")
+    for i, doc in enumerate(documents):
+        fp = doc['file_path'][:38]
+        sz = doc.get('size_human', '?')
+        print(f"│ {i+1:>2} │ {fp:<38} │ {sz:>10} │")
+    print(f"└{'─'*4}┴{'─'*40}┴{'─'*12}┘")
+    log(f"  共找到 {len(documents)} 個檔案")
+    print()
 
+    timing.end_phase()
     return documents
 
 
@@ -218,17 +299,19 @@ def _collect_files(entries: list, parent_path: str, out: list):
 
 
 # ============================================================
-# Phase 2: Extract Text & Generate Questions
+# Phase 2: Extract Text & Generate Questions (中文)
 # ============================================================
 
 async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
                                        llm_config: tuple) -> list[dict]:
-    """對每個文件: 提取文字 → 判斷 token → 生成問題 → 精煉摘要。"""
-    log("Phase 2: Extracting text and generating questions...")
+    """對每個文件: 提取文字 → 判斷 token → 生成中文問題 → 精煉摘要。"""
+    timing.start_phase("Phase 2: 文字提取與問題生成")
+    log("Phase 2: 提取文字並生成問題...")
 
     enriched = []
     for i, doc in enumerate(documents):
         file_path = doc["file_path"]
+        t0 = time.time()
         log(f"  [{i+1}/{len(documents)}] {file_path}")
 
         # Extract text via MCP
@@ -239,8 +322,9 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
             })
             extract_data = json.loads(raw)
         except Exception as e:
-            log(f"    [ERROR] Extract failed: {e}")
-            enriched.append({**doc, "error": str(e), "questions": [], "summary": ""})
+            log(f"    [錯誤] 提取失敗: {e}")
+            enriched.append({**doc, "error": str(e), "questions": [], "summary": "",
+                           "extract_time": round(time.time() - t0, 2)})
             continue
 
         extracted_text = extract_data.get("extracted_text", "")
@@ -250,24 +334,29 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
         truncated = token_stats.get("truncated", False)
 
         if not extracted_text.strip():
-            log(f"    [SKIP] No text extracted")
+            log(f"    [跳過] 無文字內容")
             enriched.append({**doc, "extracted_text": "", "questions": [],
-                           "summary": "", "token_count": 0})
+                           "summary": "", "token_count": 0,
+                           "extract_time": round(time.time() - t0, 2)})
             continue
 
         fits_context = token_count <= MAX_CONTEXT_TOKENS
-        log(f"    Tokens: ~{token_count:,}, fits context: {fits_context}, truncated: {truncated}")
+        log(f"    Tokens: ~{token_count:,}, 可放入 context: {fits_context}, 截斷: {truncated}")
 
         # 決定放入 LLM prompt 的文字量
         prompt_text = extracted_text if fits_context else extracted_text[:12000]
 
-        # Generate questions
+        # Generate questions (中文)
+        t1 = time.time()
         questions = _generate_questions(llm_config, prompt_text, file_path)
-        log(f"    Generated {len(questions)} questions")
+        question_time = round(time.time() - t1, 2)
+        log(f"    生成 {len(questions)} 個問題 ({question_time}s)")
 
         # Generate summary
+        t2 = time.time()
         summary = _generate_summary(llm_config, prompt_text, file_path)
-        log(f"    Summary: {summary[:80]}...")
+        summary_time = round(time.time() - t2, 2)
+        log(f"    摘要: {summary[:60]}... ({summary_time}s)")
 
         enriched.append({
             **doc,
@@ -277,8 +366,12 @@ async def phase2_extract_and_generate(mcp_tools, documents: list[dict],
             "truncated": truncated,
             "questions": questions,
             "summary": summary,
+            "extract_time": round(time.time() - t0, 2),
+            "question_gen_time": question_time,
+            "summary_gen_time": summary_time,
         })
 
+    timing.end_phase()
     return enriched
 
 
@@ -286,11 +379,12 @@ def _generate_questions(llm_config: tuple, text: str, file_path: str) -> list[st
     try:
         raw = _llm_completion(llm_config,
             system=(
-                "You are a document analyst. Given a document, generate 5-10 specific questions "
-                "that can be answered from the content. Return ONLY a JSON array of question strings. "
-                "Example: [\"What is the main topic?\", \"Who is the author?\"]"
+                "你是一位文件分析專家。根據提供的文件內容，生成 5-10 個具體的中文問題，"
+                "這些問題必須可以從文件內容中找到答案。"
+                "只回傳 JSON 陣列格式的問題字串，不要其他文字。"
+                "範例: [\"這份文件的主題是什麼？\", \"作者提出了哪些主要觀點？\"]"
             ),
-            user=f"Document: {file_path}\n\n---\n\n{text}",
+            user=f"文件路徑: {file_path}\n\n---\n\n{text}",
         )
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -300,7 +394,7 @@ def _generate_questions(llm_config: tuple, text: str, file_path: str) -> list[st
         if isinstance(questions, list):
             return [str(q) for q in questions[:10]]
     except Exception as e:
-        log(f"    [ERROR] Question generation failed: {e}")
+        log(f"    [錯誤] 問題生成失敗: {e}")
     return []
 
 
@@ -308,14 +402,13 @@ def _generate_summary(llm_config: tuple, text: str, file_path: str) -> str:
     try:
         return _llm_completion(llm_config,
             system=(
-                "You are a document summarizer. Provide a concise summary "
-                "in 2-3 sentences. Focus on the key topics, purpose, and main content."
+                "你是一位文件摘要專家。用 2-3 句中文簡要總結文件的關鍵主題、目的和主要內容。"
             ),
-            user=f"Document: {file_path}\n\n---\n\n{text}",
+            user=f"文件路徑: {file_path}\n\n---\n\n{text}",
             temperature=0.2, max_tokens=500,
         )
     except Exception as e:
-        log(f"    [ERROR] Summary generation failed: {e}")
+        log(f"    [錯誤] 摘要生成失敗: {e}")
     return ""
 
 
@@ -324,11 +417,12 @@ def _generate_summary(llm_config: tuple, text: str, file_path: str) -> str:
 # ============================================================
 
 def phase3_build_summary_table(enriched_docs: list[dict]) -> str:
-    log("Phase 3: Building document summary table...")
+    timing.start_phase("Phase 3: 摘要表格")
+    log("Phase 3: 建立文件摘要表格...")
 
     lines = [
-        "| # | File | Tokens | Fits Context | Summary | Questions |",
-        "|---|------|--------|--------------|---------|-----------|",
+        "| # | 檔案 | Tokens | 可放入 Context | 摘要 | 問題數 |",
+        "|---|------|--------|---------------|------|--------|",
     ]
     for i, doc in enumerate(enriched_docs):
         summary_short = doc.get("summary", "")[:60].replace("|", "/").replace("\n", " ")
@@ -338,29 +432,38 @@ def phase3_build_summary_table(enriched_docs: list[dict]) -> str:
             f"| {i+1} "
             f"| {doc['file_path']} "
             f"| {doc.get('token_count', 0):,} "
-            f"| {'Yes' if doc.get('full_text_fits_context') else 'No'} "
+            f"| {'是' if doc.get('full_text_fits_context') else '否'} "
             f"| {summary_short} "
             f"| {len(doc.get('questions', []))} |"
         )
 
     table = "\n".join(lines)
-    log(f"  Table has {len(enriched_docs)} documents")
+    log(f"  共 {len(enriched_docs)} 個文件")
     print(f"\n{table}\n")
+
+    timing.end_phase()
     return table
 
 
 # ============================================================
-# Phase 4: Agent Q&A Testing
+# Phase 4: Agent Q&A Testing (支援雙 LLM)
 # ============================================================
 
 async def phase4_agent_qa(mcp_tools, enriched_docs: list[dict],
-                          llm_config: tuple) -> list[dict]:
-    """使用 Agno Agent 根據表格中的問題逐一問答。"""
+                          llm_config: tuple, llm_config_2: tuple | None) -> list[dict]:
+    """使用 Agno Agent 根據表格中的問題逐一問答，記錄完整 tool calling 歷程。"""
     from agno.agent import Agent
 
-    log("Phase 4: Running Agent Q&A...")
+    timing.start_phase("Phase 4: Agent Q&A")
 
-    model = _create_agno_model(llm_config)
+    # 決定 Agent 使用的 LLM
+    agent_config = llm_config_2 or llm_config
+    log("Phase 4: 啟動 Agent Q&A...")
+    log(f"  Agent LLM: {agent_config[0]}")
+    if llm_config_2:
+        log(f"  (使用第二組 LLM: LLM_API_BASE_2)")
+
+    model = _create_agno_model(agent_config)
     qa_results = []
     total_questions = sum(len(d.get("questions", [])) for d in enriched_docs)
     question_idx = 0
@@ -375,7 +478,7 @@ async def phase4_agent_qa(mcp_tools, enriched_docs: list[dict],
 
         for q in questions:
             question_idx += 1
-            log(f"  [{question_idx}/{total_questions}] Q: {q[:70]}...")
+            log(f"  [{question_idx}/{total_questions}] Q: {q[:60]}...")
 
             # With summary context
             result_with = await _run_agent_question(
@@ -392,7 +495,37 @@ async def phase4_agent_qa(mcp_tools, enriched_docs: list[dict],
                 "without_summary": result_without,
             })
 
+            # 即時顯示工具呼叫歷程
+            ws = result_with
+            _print_tool_history(question_idx, q, ws)
+
+    timing.end_phase()
     return qa_results
+
+
+def _print_tool_history(idx: int, question: str, result: dict):
+    """即時在 console 輸出 Agent 的 tool calling 歷程表格。"""
+    steps = result.get("tool_steps", [])
+    q_short = question[:50]
+    print()
+    print(f"  ┌─ Q{idx}: {q_short}{'...' if len(question) > 50 else ''}")
+    if steps:
+        for i, step in enumerate(steps):
+            prefix = "  ├" if i < len(steps) - 1 else "  └"
+            args_short = step.get("arguments", "")[:60]
+            elapsed = step.get("elapsed", "")
+            elapsed_str = f" ({elapsed}s)" if elapsed else ""
+            print(f"  │  {prefix}─ [{i+1}] {step['tool']}({args_short}){elapsed_str}")
+            if step.get("result_preview"):
+                preview = step["result_preview"][:80].replace("\n", " ")
+                pad = "  │  │" if i < len(steps) - 1 else "  │   "
+                print(f"  {pad}     → {preview}")
+    else:
+        print(f"  │  └─ (無工具呼叫)")
+    ans_short = result.get("answer", "")[:80].replace("\n", " ")
+    print(f"  └─ A: {ans_short}{'...' if len(result.get('answer', '')) > 80 else ''}")
+    print(f"     耗時: {result['elapsed_seconds']:.2f}s | 工具呼叫: {len(steps)} 次")
+    print()
 
 
 async def _run_agent_question(mcp_tools, model, question: str,
@@ -400,14 +533,14 @@ async def _run_agent_question(mcp_tools, model, question: str,
     from agno.agent import Agent
 
     instructions = [
-        "You have access to rga MCP tools for document search and text extraction.",
-        "Use rga_list_documents to discover files and directories.",
-        "Use rga_search_content to find specific content by keyword.",
-        "Use rga_extract_text to read full file content.",
-        "Be concise and accurate in your answers.",
+        "你可以使用 rga MCP 工具來搜尋文件和提取文字。",
+        "使用 rga_list_documents 查看檔案和目錄。",
+        "使用 rga_search_content 透過關鍵字搜尋內容。",
+        "使用 rga_extract_text 讀取完整檔案內容。",
+        "請用中文回答問題，簡潔且準確。",
     ]
     if summary:
-        instructions.append(f"Relevant document: '{file_path}'. Summary: {summary}")
+        instructions.append(f"相關文件: '{file_path}'。摘要: {summary}")
 
     agent = Agent(
         name="Document QA Agent",
@@ -420,12 +553,15 @@ async def _run_agent_question(mcp_tools, model, question: str,
     start_time = time.time()
     answer = ""
     tool_calls_log = []
+    tool_steps = []  # 詳細工具呼叫歷程
     found_correct_file = False
 
     try:
         run_response = await agent.arun(question, stream=False)
         if run_response and run_response.content:
             answer = run_response.content
+
+        # 提取完整 tool calling 歷程
         if run_response and hasattr(run_response, "messages"):
             for msg in run_response.messages or []:
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
@@ -433,8 +569,29 @@ async def _run_agent_question(mcp_tools, model, question: str,
                         fn_name = tc.function.name if hasattr(tc, "function") else str(tc)
                         fn_args = tc.function.arguments if hasattr(tc, "function") else ""
                         tool_calls_log.append(fn_name)
+
+                        step = {
+                            "tool": fn_name,
+                            "arguments": fn_args if isinstance(fn_args, str) else json.dumps(fn_args, ensure_ascii=False),
+                            "result_preview": "",
+                            "elapsed": "",
+                        }
+                        tool_steps.append(step)
+
                         if file_path and file_path in str(fn_args):
                             found_correct_file = True
+
+                # 捕捉工具回應 (tool role messages)
+                if hasattr(msg, "role") and msg.role == "tool":
+                    content = ""
+                    if hasattr(msg, "content"):
+                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    # 將回應對應到最近一個沒有結果的 step
+                    for step in tool_steps:
+                        if not step["result_preview"]:
+                            step["result_preview"] = content[:200]
+                            break
+
     except asyncio.TimeoutError:
         answer = "TIMEOUT"
     except Exception as e:
@@ -445,34 +602,42 @@ async def _run_agent_question(mcp_tools, model, question: str,
     return {
         "answer": answer[:500] if isinstance(answer, str) else str(answer)[:500],
         "tool_calls": tool_calls_log,
-        "tool_calls_str": " → ".join(tool_calls_log) if tool_calls_log else "none",
+        "tool_steps": tool_steps,
+        "tool_calls_str": " → ".join(tool_calls_log) if tool_calls_log else "(無)",
         "found_correct_file": found_correct_file,
         "elapsed_seconds": round(elapsed, 2),
     }
 
 
 # ============================================================
-# Phase 5: Record Results
+# Phase 5: Record Results (含時間分析)
 # ============================================================
 
 def phase5_record_results(enriched_docs: list[dict], summary_table: str,
-                          qa_results: list[dict], llm_config: tuple) -> str:
-    log("Phase 5: Recording results...")
+                          qa_results: list[dict],
+                          llm_config: tuple, llm_config_2: tuple | None) -> str:
+    timing.start_phase("Phase 5: 輸出結果")
+    log("Phase 5: 記錄結果...")
 
     QA_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     filepath = QA_RESULTS_DIR / f"qa_{now.strftime('%Y%m%d_%H%M%S')}.md"
 
     model_id = llm_config[0]
+    agent_config = llm_config_2 or llm_config
+    agent_model_id = agent_config[0]
+
     total_docs = len(enriched_docs)
     total_questions = len(qa_results)
     all_tool_calls = []
+    all_tool_steps = []
     correct_files = 0
     total_elapsed = 0.0
 
     for r in qa_results:
         ws = r["with_summary"]
         all_tool_calls.extend(ws["tool_calls"])
+        all_tool_steps.extend(ws.get("tool_steps", []))
         if ws["found_correct_file"]:
             correct_files += 1
         total_elapsed += ws["elapsed_seconds"]
@@ -484,30 +649,73 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
     tool_stats_lines = []
     for tool_name, count in sorted(tool_counts.items(), key=lambda x: -x[1]):
         pct = (count / total_tc * 100) if total_tc > 0 else 0
-        tool_stats_lines.append(f"- {tool_name}: {count} calls ({pct:.0f}%)")
+        tool_stats_lines.append(f"| {tool_name} | {count} | {pct:.0f}% |")
 
     avg_time = (total_elapsed / total_questions) if total_questions > 0 else 0
     file_accuracy = (correct_files / total_questions * 100) if total_questions > 0 else 0
 
+    # Phase 2 時間統計
+    total_extract_time = sum(d.get("extract_time", 0) for d in enriched_docs)
+    total_qgen_time = sum(d.get("question_gen_time", 0) for d in enriched_docs)
+    total_sgen_time = sum(d.get("summary_gen_time", 0) for d in enriched_docs)
+
     md_parts = [
-        f"# Document QA Test Results",
+        f"# 文件 QA 測試報告",
         f"",
-        f"- **Date**: {now.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"- **Model**: {model_id}",
-        f"- **MCP URL**: {MCP_URL}",
-        f"- **Documents scanned**: {total_docs}",
-        f"- **Total questions**: {total_questions}",
-        f"- **Max context tokens**: {MAX_CONTEXT_TOKENS:,}",
+        f"## 測試環境",
         f"",
-        f"## Document Summary Table",
+        f"| 項目 | 值 |",
+        f"|------|-----|",
+        f"| 日期 | {now.strftime('%Y-%m-%d %H:%M:%S')} |",
+        f"| 問題生成 LLM | {model_id} |",
+        f"| Agent LLM | {agent_model_id} |",
+        f"| MCP URL | {MCP_URL} |",
+        f"| 掃描文件數 | {total_docs} |",
+        f"| 總問題數 | {total_questions} |",
+        f"| 最大 Context Tokens | {MAX_CONTEXT_TOKENS:,} |",
+        f"",
+    ]
+
+    # 時間分析
+    md_parts.extend([
+        f"## 時間分析",
+        f"",
+        timing.summary_table(),
+        f"",
+        f"### Phase 2 細項",
+        f"",
+        f"| 項目 | 耗時 (秒) |",
+        f"|------|-----------|",
+        f"| 文字提取 (MCP) | {total_extract_time:.2f} |",
+        f"| 問題生成 (LLM) | {total_qgen_time:.2f} |",
+        f"| 摘要生成 (LLM) | {total_sgen_time:.2f} |",
+        f"",
+        f"### Phase 4 Q&A 時間",
+        f"",
+        f"| 項目 | 值 |",
+        f"|------|-----|",
+        f"| 總耗時 | {total_elapsed:.2f}s |",
+        f"| 平均每題 | {avg_time:.2f}s |",
+        f"| 最快 | {min((r['with_summary']['elapsed_seconds'] for r in qa_results), default=0):.2f}s |",
+        f"| 最慢 | {max((r['with_summary']['elapsed_seconds'] for r in qa_results), default=0):.2f}s |",
+        f"",
+    ])
+
+    # Document Summary
+    md_parts.extend([
+        f"## 文件摘要表格",
         f"",
         summary_table,
         f"",
-        f"## Q&A Results (With Summary Context)",
+    ])
+
+    # Q&A Results
+    md_parts.extend([
+        f"## Q&A 結果 (有摘要)",
         f"",
-        f"| # | Document | Question | Answer (truncated) | Tools Called | Found File? | Time |",
-        f"|---|----------|----------|--------------------|-------------|-------------|------|",
-    ]
+        f"| # | 文件 | 問題 | 回答 (截斷) | 工具呼叫 | 定位正確 | 耗時 |",
+        f"|---|------|------|-------------|---------|---------|------|",
+    ])
 
     for i, r in enumerate(qa_results):
         ws = r["with_summary"]
@@ -523,23 +731,56 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
             f"| {question_short} "
             f"| {answer_short} "
             f"| {ws['tool_calls_str']} "
-            f"| {'Yes' if ws['found_correct_file'] else 'No'} "
+            f"| {'是' if ws['found_correct_file'] else '否'} "
             f"| {ws['elapsed_seconds']:.1f}s |"
         )
 
+    # Tool calling 詳細歷程
     md_parts.extend([
         f"",
-        f"## Tool Calling Analysis",
+        f"## 工具呼叫歷程",
         f"",
-        f"- **Total tool calls**: {total_tc}",
+    ])
+
+    for i, r in enumerate(qa_results):
+        ws = r["with_summary"]
+        steps = ws.get("tool_steps", [])
+        q_short = r["question"][:60]
+        md_parts.append(f"### Q{i+1}: {q_short}")
+        md_parts.append(f"")
+        if steps:
+            md_parts.append(f"| 步驟 | 工具 | 參數 | 結果預覽 |")
+            md_parts.append(f"|------|------|------|---------|")
+            for j, step in enumerate(steps):
+                args = step.get("arguments", "")[:50].replace("|", "/").replace("\n", " ")
+                preview = step.get("result_preview", "")[:60].replace("|", "/").replace("\n", " ")
+                md_parts.append(f"| {j+1} | `{step['tool']}` | {args} | {preview} |")
+        else:
+            md_parts.append(f"_(無工具呼叫)_")
+        md_parts.append(f"")
+
+    # Tool analysis
+    md_parts.extend([
+        f"## 工具呼叫統計",
+        f"",
+        f"| 工具 | 呼叫次數 | 佔比 |",
+        f"|------|---------|------|",
         *tool_stats_lines,
-        f"- **File discovery accuracy**: {file_accuracy:.0f}% ({correct_files}/{total_questions})",
-        f"- **Average response time**: {avg_time:.1f}s",
+        f"| **合計** | **{total_tc}** | **100%** |",
         f"",
-        f"## Summary Context Comparison",
+        f"| 項目 | 值 |",
+        f"|------|-----|",
+        f"| 檔案定位準確率 | {file_accuracy:.0f}% ({correct_files}/{total_questions}) |",
+        f"| 平均回應時間 | {avg_time:.1f}s |",
         f"",
-        f"| # | Document | Question | With Summary | Without Summary | Summary Helped? |",
-        f"|---|----------|----------|--------------|-----------------|-----------------|",
+    ])
+
+    # Summary context comparison
+    md_parts.extend([
+        f"## 摘要 Context 對照比較",
+        f"",
+        f"| # | 文件 | 問題 | 有摘要回答 | 無摘要回答 | 摘要有幫助 |",
+        f"|---|------|------|-----------|-----------|-----------|",
     ])
 
     for i, r in enumerate(qa_results):
@@ -558,12 +799,30 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
             f"| {question_short} "
             f"| {ws_short} "
             f"| {wos_short} "
-            f"| {'Yes' if helped else 'No'} |"
+            f"| {'是' if helped else '否'} |"
         )
 
     md_content = "\n".join(md_parts) + "\n"
     filepath.write_text(md_content, encoding="utf-8")
-    log(f"  Results saved to: {filepath}")
+    log(f"  結果已儲存: {filepath}")
+
+    timing.end_phase()
+
+    # 在 console 輸出最終時間分析表格
+    print()
+    log("=" * 50)
+    log("測試完成 — 時間分析")
+    log("=" * 50)
+    print()
+    print(timing.summary_table())
+    print()
+    log(f"  總耗時: {timing.total_elapsed:.2f}s")
+    log(f"  問題生成 LLM: {llm_config[0]}")
+    log(f"  Agent LLM:    {agent_config[0]}")
+    if llm_config_2:
+        log(f"  (使用雙 LLM 模式)")
+    print()
+
     return str(filepath)
 
 
@@ -575,59 +834,76 @@ async def main():
     from agno.tools.mcp import MCPTools
 
     log("=" * 60)
-    log("Document QA Workflow")
+    log("文件 QA 自動化測試")
     log("=" * 60)
 
-    # 解析 LLM 設定
+    timing.start_workflow()
+
+    # 解析主要 LLM 設定
     llm_config = _resolve_llm_config()
     if not llm_config:
-        log("[ERROR] 未設定 LLM。請在 .env 中設定 LLM_API_BASE 或 ANTHROPIC_API_KEY")
+        log("[錯誤] 未設定 LLM。請在 .env 中設定 LLM_API_BASE 或 ANTHROPIC_API_KEY")
         sys.exit(1)
 
-    log(f"  MCP URL:    {MCP_URL}")
-    log(f"  LLM Model:  {llm_config[0]}")
-    log(f"  API Base:   {llm_config[1] or 'Anthropic'}")
-    log(f"  Max Tokens: {MAX_CONTEXT_TOKENS:,}")
-    log(f"  Doc Path:   {DOCUMENTS_PATH or '(root)'}")
-    log("")
+    # 解析第二組 LLM 設定 (可選)
+    llm_config_2 = _resolve_llm_config(suffix="2")
+
+    print()
+    print(f"┌{'─'*50}┐")
+    print(f"│ {'設定項目':<20} {'值':<28} │")
+    print(f"├{'─'*50}┤")
+    print(f"│ {'MCP URL':<20} {MCP_URL:<28} │")
+    print(f"│ {'問題生成 LLM':<16} {llm_config[0]:<28} │")
+    print(f"│ {'API Base':<20} {(llm_config[1] or 'Anthropic'):<28} │")
+    if llm_config_2:
+        print(f"│ {'Agent LLM (第二組)':<14} {llm_config_2[0]:<28} │")
+        print(f"│ {'API Base 2':<20} {llm_config_2[1]:<28} │")
+    else:
+        print(f"│ {'Agent LLM':<20} {llm_config[0]+' (同上)':<28} │")
+    print(f"│ {'Max Tokens':<20} {MAX_CONTEXT_TOKENS:<28,} │")
+    print(f"│ {'文件路徑':<18} {DOCUMENTS_PATH or '(根目錄)':<28} │")
+    print(f"└{'─'*50}┘")
+    print()
 
     # Connect to MCP via HTTP
     mcp_tools = MCPTools(transport="streamable-http", url=MCP_URL)
 
     try:
         await mcp_tools.connect()
-        log("MCP connected successfully")
+        log("MCP 連線成功")
 
         tools = mcp_tools.functions
         tool_names = list(tools.keys()) if isinstance(tools, dict) else [t.name for t in tools]
-        log(f"Available tools: {tool_names}")
+        log(f"可用工具: {tool_names}")
 
         # Phase 1
         documents = await phase1_discover_documents(mcp_tools)
         if not documents:
-            log("[WARN] No documents found. Check that files are mounted in /data/documents.")
+            log("[警告] 未找到文件。請確認 /data/documents 中已掛載檔案。")
             return
 
         # Phase 2
         enriched_docs = await phase2_extract_and_generate(mcp_tools, documents, llm_config)
         docs_with_questions = [d for d in enriched_docs if d.get("questions")]
         if not docs_with_questions:
-            log("[WARN] No questions generated. Check LLM configuration.")
+            log("[警告] 沒有生成任何問題。請檢查 LLM 設定。")
             return
 
         # Phase 3
         summary_table = phase3_build_summary_table(enriched_docs)
 
         # Phase 4
-        qa_results = await phase4_agent_qa(mcp_tools, enriched_docs, llm_config)
+        qa_results = await phase4_agent_qa(mcp_tools, enriched_docs,
+                                           llm_config, llm_config_2)
 
         # Phase 5
+        timing.end_workflow()
         result_path = phase5_record_results(enriched_docs, summary_table,
-                                            qa_results, llm_config)
-        log(f"\nWorkflow complete! Results: {result_path}")
+                                            qa_results, llm_config, llm_config_2)
+        log(f"測試完成! 結果: {result_path}")
 
     except Exception as e:
-        log(f"[FATAL] {e}")
+        log(f"[致命錯誤] {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
