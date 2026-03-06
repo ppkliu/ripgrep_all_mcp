@@ -540,14 +540,14 @@ def phase3_build_summary_table(enriched_docs: list[dict]) -> str:
 
 async def phase4_agent_qa(mcp_tools, enriched_docs: list[dict],
                           llm_config: tuple, llm_config_2: tuple | None) -> list[dict]:
-    """使用 Agno Agent 根據表格中的問題逐一問答，記錄完整 tool calling 歷程及每步驟耗時。"""
+    """使用 Agno Agent 根據表格中的問題逐一問答，依序執行 pages 和 full 兩種 PDF 策略，方便比較。"""
     from agno.agent import Agent
 
     timing.start_phase("Phase 4: Agent Q&A")
 
     # 決定 Agent 使用的 LLM
     agent_config = llm_config_2 or llm_config
-    log("Phase 4: 啟動 Agent Q&A...")
+    log("Phase 4: 啟動 Agent Q&A (雙策略比較模式)")
     log(f"  Agent LLM: {agent_config[0]}")
     if llm_config_2:
         log(f"  (使用第二組 LLM: LLM_API_BASE_2)")
@@ -555,48 +555,54 @@ async def phase4_agent_qa(mcp_tools, enriched_docs: list[dict],
     model = _create_agno_model(agent_config)
     qa_results = []
     total_questions = sum(len(d.get("questions", [])) for d in enriched_docs)
-    question_idx = 0
 
-    for doc in enriched_docs:
-        file_path = doc.get("file_path", "")
-        summary = doc.get("summary", "")
-        questions = doc.get("questions", [])
+    for strategy in ["pages", "full"]:
+        strategy_label = "頁面範圍" if strategy == "pages" else "整份載入"
+        log(f"\n  ── 策略: {strategy_label} ({strategy}) ──")
 
-        if not questions:
-            continue
+        question_idx = 0
+        for doc in enriched_docs:
+            file_path = doc.get("file_path", "")
+            summary = doc.get("summary", "")
+            questions = doc.get("questions", [])
 
-        for q in questions:
-            question_idx += 1
-            log(f"  [{question_idx}/{total_questions}] Q: {q[:60]}...")
+            if not questions:
+                continue
 
-            # With summary context
-            result_with = await _run_agent_question(
-                mcp_tools, model, q, file_path, summary)
+            for q in questions:
+                question_idx += 1
+                log(f"  [{strategy}] [{question_idx}/{total_questions}] Q: {q[:60]}...")
 
-            # Without summary context
-            result_without = await _run_agent_question(
-                mcp_tools, model, q, file_path, "")
+                # With summary context
+                result_with = await _run_agent_question(
+                    mcp_tools, model, q, file_path, summary, pdf_strategy=strategy)
 
-            qa_results.append({
-                "doc_file": file_path,
-                "question": q,
-                "with_summary": result_with,
-                "without_summary": result_without,
-            })
+                # Without summary context
+                result_without = await _run_agent_question(
+                    mcp_tools, model, q, file_path, "", pdf_strategy=strategy)
 
-            # 即時顯示工具呼叫歷程
-            _print_tool_history(question_idx, q, result_with)
+                qa_results.append({
+                    "doc_file": file_path,
+                    "question": q,
+                    "pdf_strategy": strategy,
+                    "with_summary": result_with,
+                    "without_summary": result_without,
+                })
+
+                # 即時顯示工具呼叫歷程
+                _print_tool_history(question_idx, q, result_with, strategy)
 
     timing.end_phase()
     return qa_results
 
 
-def _print_tool_history(idx: int, question: str, result: dict):
+def _print_tool_history(idx: int, question: str, result: dict, strategy: str = ""):
     """即時在 console 輸出 Agent 的 tool calling 歷程（含每步驟耗時）。"""
     steps = result.get("tool_steps", [])
     q_short = question[:50]
+    strategy_tag = f" [{strategy}]" if strategy else ""
     print()
-    print(f"  ┌─ Q{idx}: {q_short}{'...' if len(question) > 50 else ''}")
+    print(f"  ┌─ Q{idx}{strategy_tag}: {q_short}{'...' if len(question) > 50 else ''}")
 
     if steps:
         for i, step in enumerate(steps):
@@ -625,7 +631,8 @@ def _print_tool_history(idx: int, question: str, result: dict):
 
 
 async def _run_agent_question(mcp_tools, model, question: str,
-                               file_path: str, summary: str) -> dict:
+                               file_path: str, summary: str,
+                               pdf_strategy: str = "pages") -> dict:
     from agno.agent import Agent
 
     instructions = [
@@ -641,15 +648,28 @@ async def _run_agent_question(mcp_tools, model, question: str,
         "根據 rga_search_content 回傳的 file 和 line_number 欄位來標註。",
         "若為 PDF 文件，line_number 對應頁碼內的行號，請同時標註檔名。",
         "若從 rga_extract_text 取得內容，標註檔名即可。",
-        "",
-        "效能提示 (兩階段加速策略):",
-        "- 如果已知檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
-        "- 大型 PDF (>30頁): 先用 rga_search_content 搜尋關鍵字找到相關頁碼，",
-        "  再用 rga_extract_text 的 page_start/page_end 參數只提取相關頁面 (速度快 5-10x)",
-        "- 小型文件 (<30頁): 直接用 rga_extract_text 提取全文",
-        "- 優先用 rga_search_content 精準搜尋，而非提取整個大文件",
-        "- 避免重複呼叫相同工具和相同參數",
     ]
+    if pdf_strategy == "full":
+        instructions.extend([
+            "",
+            "效能提示 (整份載入策略):",
+            "- 如果已知檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
+            "- PDF 文件: 先用 rga_search_content 搜尋關鍵字確認文件相關性，",
+            "  確認相關後用 rga_extract_text 載入整份 PDF 完整內容",
+            "- 小型文件: 直接用 rga_extract_text 提取全文",
+            "- 避免重複呼叫相同工具和相同參數",
+        ])
+    else:
+        instructions.extend([
+            "",
+            "效能提示 (頁面範圍加速策略):",
+            "- 如果已知檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
+            "- 大型 PDF (>30頁): 先用 rga_search_content 搜尋關鍵字找到相關頁碼，",
+            "  再用 rga_extract_text 的 page_start/page_end 參數只提取相關頁面 (速度快 5-10x)",
+            "- 小型文件 (<30頁): 直接用 rga_extract_text 提取全文",
+            "- 優先用 rga_search_content 精準搜尋，而非提取整個大文件",
+            "- 避免重複呼叫相同工具和相同參數",
+        ])
     if summary:
         instructions.append(f"相關文件: '{file_path}'。摘要: {summary}")
 
@@ -779,43 +799,83 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
     agent_model_id = agent_config[0]
 
     total_docs = len(enriched_docs)
-    total_questions = len(qa_results)
-    all_tool_calls = []
-    all_tool_steps = []
-    correct_files = 0
-    total_elapsed = 0.0
-    total_llm_time = 0.0
-    total_tool_time_all = 0.0
 
+    # 按策略分組
+    results_by_strategy: dict[str, list[dict]] = {}
     for r in qa_results:
-        ws = r["with_summary"]
-        all_tool_calls.extend(ws["tool_calls"])
-        all_tool_steps.extend(ws.get("tool_steps", []))
-        if ws["found_correct_file"]:
-            correct_files += 1
-        total_elapsed += ws["elapsed_seconds"]
-        total_llm_time += ws.get("llm_thinking_time", 0)
-        total_tool_time_all += ws.get("total_tool_time", 0)
+        s = r.get("pdf_strategy", "pages")
+        results_by_strategy.setdefault(s, []).append(r)
 
-    tool_counts: dict[str, int] = {}
-    tool_time_by_name: dict[str, float] = {}
-    for step in all_tool_steps:
-        name = step["tool"]
-        tool_counts[name] = tool_counts.get(name, 0) + 1
-        tool_time_by_name[name] = tool_time_by_name.get(name, 0) + step.get("tool_elapsed", 0)
-    total_tc = len(all_tool_calls)
+    # 計算每個策略的統計數據
+    def _calc_stats(results: list[dict]) -> dict:
+        all_tool_calls = []
+        all_tool_steps = []
+        correct_files = 0
+        total_elapsed = 0.0
+        total_llm_time = 0.0
+        total_tool_time = 0.0
+        for r in results:
+            ws = r["with_summary"]
+            all_tool_calls.extend(ws["tool_calls"])
+            all_tool_steps.extend(ws.get("tool_steps", []))
+            if ws["found_correct_file"]:
+                correct_files += 1
+            total_elapsed += ws["elapsed_seconds"]
+            total_llm_time += ws.get("llm_thinking_time", 0)
+            total_tool_time += ws.get("total_tool_time", 0)
 
-    tool_stats_lines = []
-    for tool_name, count in sorted(tool_counts.items(), key=lambda x: -x[1]):
-        pct = (count / total_tc * 100) if total_tc > 0 else 0
-        avg_t = tool_time_by_name.get(tool_name, 0) / count if count else 0
-        tool_stats_lines.append(
-            f"| {tool_name} | {count} | {pct:.0f}% | "
-            f"{tool_time_by_name.get(tool_name, 0):.2f}s | {avg_t:.2f}s |"
-        )
+        tool_counts: dict[str, int] = {}
+        tool_time_by_name: dict[str, float] = {}
+        for step in all_tool_steps:
+            name = step["tool"]
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+            tool_time_by_name[name] = tool_time_by_name.get(name, 0) + step.get("tool_elapsed", 0)
+        total_tc = len(all_tool_calls)
 
-    avg_time = (total_elapsed / total_questions) if total_questions > 0 else 0
-    file_accuracy = (correct_files / total_questions * 100) if total_questions > 0 else 0
+        tool_stats_lines = []
+        for tool_name, count in sorted(tool_counts.items(), key=lambda x: -x[1]):
+            pct = (count / total_tc * 100) if total_tc > 0 else 0
+            avg_t = tool_time_by_name.get(tool_name, 0) / count if count else 0
+            tool_stats_lines.append(
+                f"| {tool_name} | {count} | {pct:.0f}% | "
+                f"{tool_time_by_name.get(tool_name, 0):.2f}s | {avg_t:.2f}s |"
+            )
+
+        n = len(results)
+        avg_time = (total_elapsed / n) if n > 0 else 0
+        file_accuracy = (correct_files / n * 100) if n > 0 else 0
+
+        return {
+            "total_questions": n,
+            "all_tool_calls": all_tool_calls,
+            "all_tool_steps": all_tool_steps,
+            "correct_files": correct_files,
+            "total_elapsed": total_elapsed,
+            "total_llm_time": total_llm_time,
+            "total_tool_time": total_tool_time,
+            "tool_counts": tool_counts,
+            "tool_time_by_name": tool_time_by_name,
+            "total_tc": total_tc,
+            "tool_stats_lines": tool_stats_lines,
+            "avg_time": avg_time,
+            "file_accuracy": file_accuracy,
+        }
+
+    # 用全部結果做整體統計 (向後相容)
+    stats_all = _calc_stats(qa_results)
+    total_questions = stats_all["total_questions"]
+    all_tool_calls = stats_all["all_tool_calls"]
+    all_tool_steps = stats_all["all_tool_steps"]
+    correct_files = stats_all["correct_files"]
+    total_elapsed = stats_all["total_elapsed"]
+    total_llm_time = stats_all["total_llm_time"]
+    total_tool_time_all = stats_all["total_tool_time"]
+    tool_counts = stats_all["tool_counts"]
+    tool_time_by_name = stats_all["tool_time_by_name"]
+    total_tc = stats_all["total_tc"]
+    tool_stats_lines = stats_all["tool_stats_lines"]
+    avg_time = stats_all["avg_time"]
+    file_accuracy = stats_all["file_accuracy"]
 
     # Phase 2 時間統計
     total_mcp_extract = sum(d.get("mcp_extract_time", 0) for d in enriched_docs)
@@ -1013,6 +1073,65 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
             f"| {wos_short} "
             f"| {'是' if helped else '否'} |"
         )
+
+    # PDF 策略比較 (pages vs full)
+    if len(results_by_strategy) > 1:
+        md_parts.extend([
+            f"",
+            f"## PDF 策略比較 (pages vs full)",
+            f"",
+            f"| 指標 | pages (頁面範圍) | full (整份載入) | 差異 |",
+            f"|------|-----------------|----------------|------|",
+        ])
+        stats_pages = _calc_stats(results_by_strategy.get("pages", []))
+        stats_full = _calc_stats(results_by_strategy.get("full", []))
+
+        p_avg = stats_pages["avg_time"]
+        f_avg = stats_full["avg_time"]
+        diff_avg = f_avg - p_avg
+        speedup = f"pages 快 {abs(diff_avg):.1f}s" if diff_avg > 0 else f"full 快 {abs(diff_avg):.1f}s"
+        md_parts.append(f"| 平均回應時間 | {p_avg:.2f}s | {f_avg:.2f}s | {speedup} |")
+
+        md_parts.append(f"| 總耗時 | {stats_pages['total_elapsed']:.2f}s | {stats_full['total_elapsed']:.2f}s | |")
+        md_parts.append(f"| LLM 思考時間 | {stats_pages['total_llm_time']:.2f}s | {stats_full['total_llm_time']:.2f}s | |")
+        md_parts.append(f"| 工具執行時間 | {stats_pages['total_tool_time']:.2f}s | {stats_full['total_tool_time']:.2f}s | |")
+        md_parts.append(f"| 工具呼叫次數 | {stats_pages['total_tc']} | {stats_full['total_tc']} | |")
+        md_parts.append(f"| 檔案定位準確率 | {stats_pages['file_accuracy']:.0f}% | {stats_full['file_accuracy']:.0f}% | |")
+        md_parts.append(f"")
+
+        # 逐題對比
+        pages_results = results_by_strategy.get("pages", [])
+        full_results = results_by_strategy.get("full", [])
+        if len(pages_results) == len(full_results):
+            md_parts.extend([
+                f"### 逐題比較",
+                f"",
+                f"| # | 問題 | pages 耗時 | full 耗時 | pages 工具次數 | full 工具次數 | 較快 |",
+                f"|---|------|-----------|----------|--------------|-------------|------|",
+            ])
+            for i, (pr, fr) in enumerate(zip(pages_results, full_results)):
+                p_ws = pr["with_summary"]
+                f_ws = fr["with_summary"]
+                q_short = pr["question"][:40].replace("|", "/")
+                p_t = p_ws["elapsed_seconds"]
+                f_t = f_ws["elapsed_seconds"]
+                p_tc = len(p_ws["tool_calls"])
+                f_tc = len(f_ws["tool_calls"])
+                winner = "pages" if p_t <= f_t else "full"
+                md_parts.append(
+                    f"| {i+1} | {q_short} | {p_t:.1f}s | {f_t:.1f}s | {p_tc} | {f_tc} | {winner} |"
+                )
+            md_parts.append(f"")
+
+        # Console 輸出策略比較摘要
+        print()
+        log("── PDF 策略比較 ──")
+        log(f"  {'指標':<16} {'pages':<12} {'full':<12} {'差異'}")
+        log(f"  {'─'*16} {'─'*12} {'─'*12} {'─'*16}")
+        log(f"  {'平均回應時間':<14} {p_avg:<12.2f} {f_avg:<12.2f} {speedup}")
+        log(f"  {'工具執行時間':<14} {stats_pages['total_tool_time']:<12.2f} {stats_full['total_tool_time']:<12.2f}")
+        log(f"  {'工具呼叫次數':<14} {stats_pages['total_tc']:<12} {stats_full['total_tc']:<12}")
+        log(f"  {'檔案定位率':<15} {stats_pages['file_accuracy']:<11.0f}% {stats_full['file_accuracy']:<11.0f}%")
 
     md_content = "\n".join(md_parts) + "\n"
     filepath.write_text(md_content, encoding="utf-8")
