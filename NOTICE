@@ -1,0 +1,59 @@
+rga-mcp-server
+Copyright 2025 rga-mcp-server contributors
+
+This product includes software developed by third parties.
+
+==========================================================================
+Third-Party Software Notices
+==========================================================================
+
+1. ripgrep-all (rga)
+   - License: AGPL-3.0
+   - Source: https://github.com/phiresky/ripgrep-all
+   - Usage: Invoked as an independent external binary via child_process
+     (subprocess). This project does NOT link to or embed rga's source code.
+     rga is called as a standalone CLI tool for document text extraction
+     and search.
+   - Note: The AGPL-3.0 license applies to the rga binary itself, not to
+     this MCP server. This project invokes rga as a separate process via
+     command-line interface, which constitutes use as an independent work
+     under copyright law.
+
+2. poppler-utils (pdftotext)
+   - License: GPL-2.0
+   - Source: https://poppler.freedesktop.org/
+   - Usage: Invoked as an independent external binary via child_process
+     for PDF page-range text extraction.
+
+3. Tesseract OCR
+   - License: Apache-2.0
+   - Source: https://github.com/tesseract-ocr/tesseract
+   - Usage: Invoked as an independent external binary via rga's OCR adapter.
+
+4. pandoc
+   - License: GPL-2.0
+   - Source: https://pandoc.org/
+   - Usage: Invoked as an independent external binary via rga's pandoc adapter
+     for DOCX, EPUB, ODT, and HTML conversion.
+
+5. FFmpeg
+   - License: LGPL-2.1 / GPL-2.0
+   - Source: https://ffmpeg.org/
+   - Usage: Invoked as an independent external binary via rga's ffmpeg adapter
+     for media subtitle extraction.
+
+==========================================================================
+Architecture Note on License Compliance
+==========================================================================
+
+This MCP server (Apache-2.0) interacts with the above tools exclusively
+through subprocess execution (child_process.execFile / CLI invocation).
+There is no static or dynamic linking. Each tool runs as an independent
+operating system process with communication limited to stdin/stdout text
+streams. Under established open-source legal interpretation, this
+constitutes "mere aggregation" and does not create a derivative work.
+
+The Docker image bundles these tools for convenience. Users who
+redistribute the Docker image should ensure compliance with each
+component's license terms, particularly making source code available
+for GPL/AGPL components upon request.
