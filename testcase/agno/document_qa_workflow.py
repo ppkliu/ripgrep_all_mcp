@@ -1049,11 +1049,69 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
 # Main
 # ============================================================
 
+def _extract_file_paths(prompt: str) -> list[str]:
+    """從 prompt 中提取可能的檔案路徑。"""
+    import re
+    # 匹配常見檔案路徑模式: ./path/file.ext, path/file.ext, file.ext
+    patterns = [
+        r'(?:\.\/|\/)?[\w\-\.\/]+\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt|epub|odt|txt|md|csv|json|xml|yaml|yml|zip|tar\.gz|html)',
+    ]
+    paths = []
+    for pat in patterns:
+        for m in re.finditer(pat, prompt, re.IGNORECASE):
+            paths.append(m.group(0))
+    return list(dict.fromkeys(paths))  # 去重保序
+
+
+PRE_EXTRACT_MAX_TOKENS = 100_000  # 小於 100K tokens 的文件預先載入
+
+
 async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
     """直接提問模式: 用 Agent 搜尋文件並回答問題。"""
     from agno.agent import Agent
 
     model = _create_agno_model(agent_config)
+
+    model_id, api_base, _ = agent_config
+    print(f"┌{'─'*58}┐")
+    print(f"│ {'Prompt 模式':<52} │")
+    print(f"├{'─'*58}┤")
+    print(f"│ {'LLM 模型':<10}: {model_id:<42} │")
+    print(f"│ {'API Base':<10}: {(api_base or 'Anthropic'):<42} │")
+    print(f"│ {'MCP URL':<10}: {MCP_URL:<42} │")
+    print(f"└{'─'*58}┘")
+    print()
+    log(f"提問: {prompt}")
+    print()
+
+    # 預載入: 偵測 prompt 中的檔案路徑，預先提取內容放入 context
+    file_paths = _extract_file_paths(prompt)
+    preloaded_docs = {}  # {path: extracted_text}
+    preload_time = 0.0
+
+    if file_paths:
+        log(f"偵測到 {len(file_paths)} 個檔案路徑，嘗試預先載入...")
+        for fp in file_paths:
+            t0 = time.time()
+            try:
+                raw = await _call_tool(mcp_tools, "rga_extract_text", {
+                    "file_id": fp,
+                    "max_tokens": PRE_EXTRACT_MAX_TOKENS,
+                })
+                data = json.loads(raw)
+                text = data.get("extracted_text", "")
+                tokens = data.get("token_stats", {}).get("full_document_tokens", 0)
+                elapsed_extract = round(time.time() - t0, 2)
+                preload_time += elapsed_extract
+
+                if text and tokens <= PRE_EXTRACT_MAX_TOKENS:
+                    preloaded_docs[fp] = text
+                    log(f"  預載入: {fp} ({tokens:,} tokens, {elapsed_extract}s)")
+                else:
+                    log(f"  跳過預載入: {fp} ({tokens:,} tokens > {PRE_EXTRACT_MAX_TOKENS:,})")
+            except Exception as e:
+                log(f"  預載入失敗: {fp} - {e}")
+        print()
 
     instructions = [
         "你可以使用 rga MCP 工具來搜尋文件和提取文字。",
@@ -1070,10 +1128,25 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
         "若從 rga_extract_text 取得內容，標註檔名即可。",
         "",
         "效能提示:",
-        "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents",
-        "- 如果只需要特定關鍵字，優先用 rga_search_content 而非提取整個檔案",
+        "- 以下文件內容已預先載入，不需要再用 rga_extract_text 提取",
+        "- 如果需要更精確的搜尋，可以用 rga_search_content",
         "- 避免重複呼叫相同工具和相同參數",
     ]
+
+    # 將預載入的文件內容注入 instructions
+    if preloaded_docs:
+        instructions.append("")
+        instructions.append("=" * 40)
+        instructions.append("以下是已預先載入的文件內容:")
+        instructions.append("=" * 40)
+        for fp, text in preloaded_docs.items():
+            instructions.append(f"\n--- 文件: {fp} ---")
+            instructions.append(text)
+            instructions.append(f"--- 文件結束: {fp} ---\n")
+    else:
+        # 沒有預載入的情況，保留原始效能提示
+        instructions[-3] = "- 如果用戶已提供完整檔案路徑，直接用 rga_extract_text，不需要先 rga_list_documents"
+        instructions[-2] = "- 如果只需要特定關鍵字，優先用 rga_search_content 而非提取整個檔案"
 
     agent = Agent(
         name="Document QA Agent",
@@ -1082,18 +1155,6 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
         instructions=instructions,
         markdown=True,
     )
-
-    model_id, api_base, _ = agent_config
-    print(f"┌{'─'*58}┐")
-    print(f"│ {'Prompt 模式':<52} │")
-    print(f"├{'─'*58}┤")
-    print(f"│ {'LLM 模型':<10}: {model_id:<42} │")
-    print(f"│ {'API Base':<10}: {(api_base or 'Anthropic'):<42} │")
-    print(f"│ {'MCP URL':<10}: {MCP_URL:<42} │")
-    print(f"└{'─'*58}┘")
-    print()
-    log(f"提問: {prompt}")
-    print()
 
     start_time = time.time()
 
@@ -1169,17 +1230,23 @@ async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
             print()
 
         # 瓶頸分析
-        tool_pct = round(total_tool_time / elapsed * 100, 1) if elapsed > 0 else 0
-        llm_pct = round(llm_thinking_time / elapsed * 100, 1) if elapsed > 0 else 0
+        total_elapsed = elapsed + preload_time
+        tool_pct = round(total_tool_time / total_elapsed * 100, 1) if total_elapsed > 0 else 0
+        llm_pct = round(llm_thinking_time / total_elapsed * 100, 1) if total_elapsed > 0 else 0
+        preload_pct = round(preload_time / total_elapsed * 100, 1) if total_elapsed > 0 else 0
         bottleneck = "LLM 思考" if llm_thinking_time >= total_tool_time else "工具執行"
 
         print(f"┌{'─'*58}┐")
         print(f"│ {'效能分析':<52} │")
         print(f"├{'─'*58}┤")
-        print(f"│ {'總耗時':<12}: {elapsed:>8.2f}s{'':<34} │")
-        print(f"│ {'LLM 思考':<10}: {llm_thinking_time:>8.2f}s ({llm_pct:>5.1f}%){'':<24} │")
-        print(f"│ {'工具執行':<10}: {total_tool_time:>8.2f}s ({tool_pct:>5.1f}%){'':<24} │")
-        print(f"│ {'工具呼叫':<10}: {len(tool_steps):>8} 次{'':<34} │")
+        print(f"│ {'總耗時':<12}: {total_elapsed:>8.2f}s{'':<34} │")
+        if preload_time > 0:
+            print(f"│ {'文件預載入':<8}: {preload_time:>8.2f}s ({preload_pct:>5.1f}%)"
+                  f"  {len(preloaded_docs)} 個文件{'':<10} │")
+        print(f"│ {'Agent 耗時':<8}: {elapsed:>8.2f}s{'':<36} │")
+        print(f"│ {'  LLM 思考':<8}: {llm_thinking_time:>8.2f}s ({llm_pct:>5.1f}%){'':<24} │")
+        print(f"│ {'  工具執行':<8}: {total_tool_time:>8.2f}s ({tool_pct:>5.1f}%){'':<24} │")
+        print(f"│ {'  工具呼叫':<8}: {len(tool_steps):>8} 次{'':<34} │")
         print(f"│ {'瓶頸':<12}: {bottleneck:<40} │")
         print(f"└{'─'*58}┘")
 
