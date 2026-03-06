@@ -267,9 +267,10 @@ source testcase/agno/.venv/bin/activate
 cd testcase/agno
 cp .env.example .env     # 編輯填入 LLM_API_BASE / LLM_API_KEY 等
 
-# 4. 執行 (三種方式)
-python document_qa_workflow.py                    # 使用 .env 設定
-python document_qa_workflow.py --model openai/qwen3 --api-base http://localhost:1234/v1  # CLI 指定
+# 4. 執行
+python document_qa_workflow.py                    # 完整自動化測試
+python document_qa_workflow.py --use-model 2      # Agent 使用第二組 LLM
+python document_qa_workflow.py --prompt "這份文件的主題是什麼？"  # 直接提問模式
 python document_qa_workflow.py --help             # 查看所有參數
 ```
 
@@ -280,6 +281,8 @@ python document_qa_workflow.py --help             # 查看所有參數
 
 | 參數 | 說明 | 對應環境變數 |
 |------|------|-------------|
+| `--prompt` | 直接提問模式 (跳過自動測試) | — |
+| `--use-model` | Agent 使用哪組 LLM: `1` 或 `2` | — |
 | `--model` | 主要 LLM 模型名稱 | `LLM_MODEL` |
 | `--api-base` | 主要 LLM API 端點 | `LLM_API_BASE` |
 | `--api-key` | 主要 LLM API key | `LLM_API_KEY` |
@@ -290,15 +293,19 @@ python document_qa_workflow.py --help             # 查看所有參數
 | `--max-tokens` | 最大 context token 數 | `MAX_CONTEXT_TOKENS` |
 | `--doc-path` | 文件子路徑 | `DOCUMENTS_PATH` |
 
-**雙 LLM 模式**（選填）：設定 `--model-2` / `--api-base-2` 或 `LLM_API_BASE_2` 可讓 Phase 4 Agent 使用不同的 LLM，方便比較不同模型的 tool calling 能力：
+**直接提問模式**: 使用 `--prompt` 跳過自動測試流程，直接讓 Agent 搜尋文件並回答：
 ```bash
-# CLI 方式
-python document_qa_workflow.py --model-2 openai/llama3 --api-base-2 http://localhost:8000/v1
+python document_qa_workflow.py --prompt "找出關於 MCP 架構的說明"
+python document_qa_workflow.py --prompt "這份報告的結論是什麼？" --use-model 2
+```
 
-# 或 .env 方式
-LLM_API_BASE_2=http://localhost:8000/v1
-LLM_API_KEY_2=no-key
-# LLM_MODEL_2=openai/your-agent-model   # 選填，未設定時自動偵測
+**雙 LLM 模式**（選填）：設定 `--model-2` / `--api-base-2` 或 `LLM_API_BASE_2` 可讓 Agent 使用不同的 LLM。使用 `--use-model 2` 快速切換：
+```bash
+# 快速切換 Agent 使用第二組 LLM
+python document_qa_workflow.py --use-model 2
+
+# 或直接指定第二組 LLM
+python document_qa_workflow.py --model-2 openai/llama3 --api-base-2 http://localhost:8000/v1
 ```
 
 進階設定（`.env`、export 或 CLI）：

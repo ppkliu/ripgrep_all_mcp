@@ -15,7 +15,8 @@ Document QA Workflow — Agno Agent + MCP + LiteLLM
 
 CLI 參數可覆蓋 .env 設定:
     python document_qa_workflow.py --model openai/qwen3 --api-base http://localhost:1234/v1
-    python document_qa_workflow.py --model-2 openai/llama3 --api-base-2 http://localhost:8000/v1
+    python document_qa_workflow.py --use-model 2          # Agent 使用第二組 LLM
+    python document_qa_workflow.py --prompt "這份文件的主題是什麼？"  # 直接提問模式
     python document_qa_workflow.py --help
 
 使用方式:
@@ -74,19 +75,26 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 範例:
-  # 使用 .env 設定
+  # 完整自動化測試 (使用 .env 設定)
   python document_qa_workflow.py
 
   # 指定主要 LLM
   python document_qa_workflow.py --model openai/qwen3 --api-base http://localhost:1234/v1
 
-  # 指定 Agent 使用第二組 LLM
-  python document_qa_workflow.py --model-2 openai/llama3 --api-base-2 http://localhost:8000/v1
+  # Agent 使用第二組 LLM
+  python document_qa_workflow.py --use-model 2
 
-  # 覆蓋 MCP URL
-  python document_qa_workflow.py --mcp-url http://localhost:30003/mcp
+  # 直接提問模式 (跳過自動測試流程)
+  python document_qa_workflow.py --prompt "這份文件的主題是什麼？"
+  python document_qa_workflow.py --prompt "找出關於 MCP 的說明" --use-model 2
 """,
     )
+    # 模式選擇
+    p.add_argument("--prompt", help="直接提問模式: 輸入問題讓 Agent 搜尋文件並回答")
+    p.add_argument("--use-model", choices=["1", "2"], default="1",
+                   help="Agent 使用哪組 LLM: 1=主要, 2=第二組 (預設: 1)")
+
+    # LLM 設定覆蓋
     p.add_argument("--model", help="主要 LLM 模型名稱 (覆蓋 LLM_MODEL)")
     p.add_argument("--api-base", help="主要 LLM API 端點 (覆蓋 LLM_API_BASE)")
     p.add_argument("--api-key", help="主要 LLM API key (覆蓋 LLM_API_KEY)")
@@ -620,6 +628,13 @@ async def _run_agent_question(mcp_tools, model, question: str,
         "使用 rga_search_content 透過關鍵字搜尋內容。",
         "使用 rga_extract_text 讀取完整檔案內容。",
         "請用中文回答問題，簡潔且準確。",
+        "",
+        "重要: 回答時必須標註參考來源。格式範例:",
+        "  📄 來源: filename.pdf (第 3 頁, 行 42)",
+        "  📄 來源: report.docx (行 15-20)",
+        "根據 rga_search_content 回傳的 file 和 line_number 欄位來標註。",
+        "若為 PDF 文件，line_number 對應頁碼內的行號，請同時標註檔名。",
+        "若從 rga_extract_text 取得內容，標註檔名即可。",
     ]
     if summary:
         instructions.append(f"相關文件: '{file_path}'。摘要: {summary}")
@@ -1029,6 +1044,84 @@ def phase5_record_results(enriched_docs: list[dict], summary_table: str,
 # Main
 # ============================================================
 
+async def _run_prompt_mode(mcp_tools, prompt: str, agent_config: tuple):
+    """直接提問模式: 用 Agent 搜尋文件並回答問題。"""
+    from agno.agent import Agent
+
+    model = _create_agno_model(agent_config)
+
+    instructions = [
+        "你可以使用 rga MCP 工具來搜尋文件和提取文字。",
+        "使用 rga_list_documents 查看檔案和目錄。",
+        "使用 rga_search_content 透過關鍵字搜尋內容。",
+        "使用 rga_extract_text 讀取完整檔案內容。",
+        "請用中文回答問題，詳細且準確。",
+        "",
+        "重要: 回答時必須標註參考來源。格式範例:",
+        "  📄 來源: filename.pdf (第 3 頁, 行 42)",
+        "  📄 來源: report.docx (行 15-20)",
+        "根據 rga_search_content 回傳的 file 和 line_number 欄位來標註。",
+        "若為 PDF 文件，line_number 對應頁碼內的行號，請同時標註檔名。",
+        "若從 rga_extract_text 取得內容，標註檔名即可。",
+    ]
+
+    agent = Agent(
+        name="Document QA Agent",
+        model=model,
+        tools=[mcp_tools],
+        instructions=instructions,
+        markdown=True,
+    )
+
+    log(f"提問: {prompt}")
+    log(f"Agent LLM: {agent_config[0]}")
+    print()
+
+    start_time = time.time()
+
+    try:
+        run_response = await agent.arun(prompt, stream=False)
+        elapsed = round(time.time() - start_time, 2)
+
+        # 顯示回答
+        print("=" * 60)
+        print("回答:")
+        print("=" * 60)
+        if run_response and run_response.content:
+            print(run_response.content)
+        print()
+
+        # 顯示工具呼叫歷程
+        tool_calls = []
+        if run_response and hasattr(run_response, "messages"):
+            for msg in run_response.messages or []:
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        fn_name = tc.function.name if hasattr(tc, "function") else str(tc)
+                        fn_args = tc.function.arguments if hasattr(tc, "function") else ""
+                        tool_calls.append({"tool": fn_name, "arguments": fn_args})
+
+        if tool_calls:
+            print(f"┌{'─'*50}┐")
+            print(f"│ {'工具呼叫歷程':<44} │")
+            print(f"├{'─'*4}┬{'─'*25}┬{'─'*19}┤")
+            print(f"│ {'#':>2} │ {'工具':<23} │ {'參數':<17} │")
+            print(f"├{'─'*4}┼{'─'*25}┼{'─'*19}┤")
+            for i, tc in enumerate(tool_calls):
+                tool = tc["tool"][:23]
+                args_short = str(tc["arguments"])[:17]
+                print(f"│ {i+1:>2} │ {tool:<23} │ {args_short:<17} │")
+            print(f"└{'─'*4}┴{'─'*25}┴{'─'*19}┘")
+
+        print()
+        log(f"耗時: {elapsed}s | 工具呼叫: {len(tool_calls)} 次")
+
+    except Exception as e:
+        log(f"[錯誤] {e}")
+        import traceback
+        traceback.print_exc()
+
+
 async def main():
     from agno.tools.mcp import MCPTools
 
@@ -1053,6 +1146,15 @@ async def main():
     # 解析第二組 LLM 設定 (可選)
     llm_config_2 = _resolve_llm_config(suffix="2")
 
+    # 根據 --use-model 決定 Agent 使用哪組 LLM
+    if args.use_model == "2":
+        if not llm_config_2:
+            log("[錯誤] --use-model 2 但未設定第二組 LLM (LLM_API_BASE_2)")
+            sys.exit(1)
+        agent_config = llm_config_2
+    else:
+        agent_config = llm_config_2 or llm_config
+
     print()
     print(f"┌{'─'*50}┐")
     print(f"│ {'設定項目':<20} {'值':<28} │")
@@ -1060,13 +1162,15 @@ async def main():
     print(f"│ {'MCP URL':<20} {MCP_URL:<28} │")
     print(f"│ {'問題生成 LLM':<16} {llm_config[0]:<28} │")
     print(f"│ {'API Base':<20} {(llm_config[1] or 'Anthropic'):<28} │")
-    if llm_config_2:
-        print(f"│ {'Agent LLM (第二組)':<14} {llm_config_2[0]:<28} │")
-        print(f"│ {'API Base 2':<20} {llm_config_2[1]:<28} │")
+    if agent_config != llm_config:
+        print(f"│ {'Agent LLM (第二組)':<14} {agent_config[0]:<28} │")
+        print(f"│ {'API Base 2':<20} {agent_config[1]:<28} │")
     else:
         print(f"│ {'Agent LLM':<20} {llm_config[0]+' (同上)':<28} │")
     print(f"│ {'Max Tokens':<20} {MAX_CONTEXT_TOKENS:<28,} │")
     print(f"│ {'文件路徑':<18} {DOCUMENTS_PATH or '(根目錄)':<28} │")
+    if args.prompt:
+        print(f"│ {'模式':<20} {'直接提問':<28} │")
     print(f"└{'─'*50}┘")
     print()
 
@@ -1080,6 +1184,13 @@ async def main():
         tools = mcp_tools.functions
         tool_names = list(tools.keys()) if isinstance(tools, dict) else [t.name for t in tools]
         log(f"可用工具: {tool_names}")
+
+        # --prompt 模式: 直接提問
+        if args.prompt:
+            await _run_prompt_mode(mcp_tools, args.prompt, agent_config)
+            return
+
+        # === 完整自動化測試流程 ===
 
         # Phase 1
         documents = await phase1_discover_documents(mcp_tools)
@@ -1097,14 +1208,15 @@ async def main():
         # Phase 3
         summary_table = phase3_build_summary_table(enriched_docs)
 
-        # Phase 4
+        # Phase 4 — 使用 --use-model 選擇的 LLM
+        effective_config_2 = agent_config if agent_config != llm_config else None
         qa_results = await phase4_agent_qa(mcp_tools, enriched_docs,
-                                           llm_config, llm_config_2)
+                                           llm_config, effective_config_2)
 
         # Phase 5
         timing.end_workflow()
         result_path = phase5_record_results(enriched_docs, summary_table,
-                                            qa_results, llm_config, llm_config_2)
+                                            qa_results, llm_config, effective_config_2)
         log(f"測試完成! 結果: {result_path}")
 
     except Exception as e:
