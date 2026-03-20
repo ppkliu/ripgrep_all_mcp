@@ -18,8 +18,8 @@ services:
       - LOG_LEVEL=info
 
     volumes:
-      - ./documents:/data/documents:ro
-      - rga-uploads:/data/uploads
+      - ./data/documents:/data/documents:ro
+      - ./data/uploads:/data/uploads
       - rga-cache:/data/cache
 
     ports:
@@ -28,11 +28,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
-          cpus: "2.0"
+          memory: 4G
+          cpus: "4.0"
         reservations:
           memory: 512M
 
 volumes:
-  rga-uploads:
+  #rga-uploads:
   rga-cache:
